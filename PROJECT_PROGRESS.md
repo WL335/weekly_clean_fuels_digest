@@ -65,7 +65,19 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Added deterministic digest IDs, Message-ID/footer markers, pre-send transaction recording, fail-closed pending-send handling, and `--resolve-pending` recovery choices.
 - [x] Added startup structure validation, parameterized default seven-day reporting-window tests, bounded Gmail/OpenAI request timeouts, and an overall 55-minute work budget.
 - [x] Added configurable log rotation (5 MB, five backups by default); preview artifacts continue to overwrite fixed filenames.
-- [x] Expanded the offline suite to 27 passing tests covering identity regressions, provider-schema compatibility, state compatibility, pending-send resolution, Message-ID markers, and update rendering.
+- [x] Expanded the offline suite with identity regressions, provider-schema compatibility, state compatibility, pending-send resolution, Message-ID markers, and update rendering coverage.
+- [x] Added failure notification through channels independent of the mail transport: a `runtime/state/last_failure.json` record, a Windows `msg.exe` popup, a date-stamped Desktop marker file, and a best-effort Windows Application event log entry. Every channel records whether it succeeded.
+- [x] Split process exit codes so a configuration or credential failure (`2`) is distinguishable from a runtime failure (`1`) in Task Scheduler history.
+- [x] Moved the `OPENAI_API_KEY` presence check into the application so a missing key is reported through the alert channels instead of only as a batch-file exit code.
+- [x] Added an independent delivery watchdog (`weekly_clean_fuels_digest.watchdog`, `scripts\run_watchdog.bat`) with its own Saturday Task Scheduler entry. It uses no mail transport, needs no OpenAI key, judges a period by that period's own send transaction, allows a configurable grace period after the scheduled send time, reports an unresolved pending transaction separately, and notifies at most once per missed period.
+- [x] Added the `alerts.*` configuration section with startup validation for the notification switches and the grace period.
+- [x] Moved digest-ID insertion out of a string replacement in `main.py` into a `digest_id` argument on both renderers, removing the cross-module markup coupling.
+- [x] Moved `send_digest` into the Gmail provider adapter, where the rebuild specification places mail sending, and dropped the now-unused `base64` and `EmailMessage` imports from `main.py`.
+- [x] Applied the public-URL check to the plain-text renderer as well, so a local digest without a public source URL no longer leaks a `file:///` path into the plain-text email.
+- [x] Added a GitHub Actions workflow that runs the offline suite on Windows for Python 3.11 and 3.13 with no Gmail access, no delivery, no production key, and a guard against tracked credentials.
+- [x] Collapsed the duplicated subsection rendering into one section table (`SECTION_SPECS`) plus one grouping step (`layout_program`) shared by both formats. Adding a subsection is now one table entry instead of edits in four near-identical render blocks.
+- [x] Encoded the link-scope rules in that table: the two California pathway groups share one workbook link, guidance has its own, and ordinary items carry a link each.
+- [x] Added renderer snapshot tests against a frozen fixture configuration, so the live regulatory inventory no longer churns the expected output. HTML and plain text stayed byte-identical through the refactor.
 
 ## Current Runtime Configuration
 
@@ -89,6 +101,10 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 | OpenAI request timeout | 90 seconds per attempt |
 | Overall run budget | 55 minutes |
 | Log rotation | 5 MB per file; five backups |
+| Failure alerts | `msg.exe` popup, Desktop marker file, Windows event log (all enabled) |
+| Watchdog schedule | Every Saturday at 09:00 local time |
+| Watchdog grace period | 6 hours after the scheduled Friday 09:00 send (`alerts.grace_hours`) |
+| Process exit codes | `0` success, `1` runtime failure, `2` configuration/credential failure, `3` watchdog alert |
 | California LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\CA_LCFS\digest_input` |
 | BC LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\BC_LCFS\digest_input` |
 | Source-link label | `View original source →` |
@@ -145,12 +161,16 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - Targeted offline regression tests pass after relocation.
 - No generated pytest cache or test work directory remains in the production tree after cleanup.
 - BC LCFS local guidance is included only when `generated_at` falls within the reporting period, appears under `Guidance Updates`, and links once to the official BC source page.
-- The complete offline regression suite passes 8 tests after the modular interface refactor.
-- The updated complete offline regression suite passes 27 tests.
+- The complete offline regression suite passes (55 tests at the last recorded run; run `pytest -q` for the current count).
 - Legacy email item keys remain compatible; local source identity regressions are covered by tests.
 - A pending send is persisted before the provider call and can be resolved through the CLI rather than manual state-file editing.
-- The Task Scheduler action and working directory both point to the production Code path; latest run result code is 0, but no Friday scheduled send has yet been verified after this check.
+- The Task Scheduler action and working directory both point to the production Code path. A delivered send is recorded for the period ending 2026-10-02 (sent 09:12 local time, Gmail message ID `1a0fd2ce718f103a`, 16 items).
 - Disabling `integrations.local_digest_enabled` bypasses the optional local interface while preserving the Gmail core and shared output pipeline.
+- A failed send-mode run writes `runtime/state/last_failure.json`, shows a message box, and writes a Desktop marker file; every channel reports its own outcome in the log.
+- Alert channels were exercised for real on the production machine on 2026-10-04: the Desktop marker was written (`C:\Users\48596\Desktop\Weekly Digest ALERT 2026-10-04.txt`) and the message box was displayed and acknowledged by the operator. `msg.exe` is not installed on this machine, so the PowerShell message box fallback is the path that ran. `eventcreate.exe` returned `Access is denied`, so the event-log channel is disabled in configuration.
+- The watchdog was run against live state: it reported `ok` for the period ending 2026-10-02 and wrote no alert bookkeeping, confirming it does not raise a false alarm for a delivered period.
+- Rendered HTML and plain text match the recorded snapshots byte for byte after the section-table refactor, and the link-scope rule is asserted inside the California cluster rather than across the whole document.
+- The offline suite passes 59 tests (run `pytest -q` for the current count).
 
 ## Known Constraints
 
@@ -165,6 +185,8 @@ Operational consequence: the computer must be powered on and the Windows user mu
 9. The old project location may retain an empty directory until the previous workspace process releases its Windows filesystem handle; it contains no application files and does not affect production.
 10. The virtual environment metadata and text activation scripts now point to the new project path. Some generated console-launcher `.exe` files still contain the old absolute path; the scheduled wrapper and verified tests invoke `.venv\Scripts\python.exe` directly, so use `python -m ...` commands or rebuild the environment before relying on those launcher executables.
 11. The current California input schema contains `added_pathways` only; `Existing Pathway Updates` will remain empty until the upstream producer supplies `updated_pathways` records with prior/current CI values.
+12. The delivery watchdog runs on the same computer as the digest. It cannot report a period in which the machine was powered off, or nobody was logged in, for the whole time; covering that case would require an off-machine heartbeat.
+13. Alert delivery depends on the session: the Windows event-log channel needs an elevated task and is therefore disabled, the message box needs an interactive session, and the Desktop marker is the only channel that works with nobody logged in.
 
 ## Commercial Repository Standard
 
@@ -172,7 +194,7 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - Generated test caches and work directories are disposable and must be excluded from source control.
 - Runtime credentials remain only in `runtime/secrets/` and must never be committed, logged, or included in shared bundles.
 - Production and development dependencies remain separated in `requirements.txt` and `requirements-dev.txt`.
-- Material changes require regression testing, preview inspection, and synchronized updates to all three project documents.
+- Material changes require regression testing, preview inspection, and synchronized updates to all three project documents; continuous integration enforces the offline suite on every push.
 - Logs rotate at a configured size; fixed-name previews are overwritten. State is intentionally retained without pruning.
 
 ## Recommended Next Improvements
@@ -183,7 +205,9 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - [x] Add configurable log rotation; preview files are overwritten and state is retained.
 - [ ] Add a health-check command that verifies credentials, paths, model access, and scheduler visibility without sending mail.
 - [ ] Consider a non-interactive service identity if the digest must run while the Windows user is logged out.
-- [ ] Add automated notification for a failed scheduled run without creating a second dependency loop.
+- [x] Added local failure notification (popup, Desktop marker, Windows event log) and an independent Saturday delivery watchdog without adding an external service or dependency.
+- [x] Verified the alert channels on the production machine with `scripts\run_watchdog.bat --test-alert`: the message box was displayed and acknowledged, and the Desktop marker was written. The event-log channel was disabled because it requires elevation.
+- [ ] Consider an off-machine heartbeat if whole-week downtime must also be detected.
 - [ ] Review the regulatory program inventory quarterly.
 
 ## Operating Checklist

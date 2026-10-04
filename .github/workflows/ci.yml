@@ -1,0 +1,40 @@
+name: CI
+
+# Offline only: no Gmail access, no mail is sent, and no production key is used.
+on:
+  push:
+    branches: ["main", "DS-fix"]
+  pull_request:
+
+jobs:
+  offline-tests:
+    name: Offline tests (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Ensure no credentials are tracked
+        shell: pwsh
+        run: |
+          $tracked = git ls-files runtime/secrets
+          if ($tracked) { throw "Credentials must never be tracked: $tracked" }
+
+      - name: Run the offline suite
+        env:
+          # Deliberately blank: the suite must pass without a real key, and a
+          # configured repository secret must not leak into the tests.
+          OPENAI_API_KEY: ""
+        run: python -m pytest -q

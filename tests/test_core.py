@@ -142,14 +142,67 @@ def test_digest_id_is_stable_for_same_period_and_configuration():
 
 
 def test_digest_id_is_embedded_in_both_preview_formats():
-    html_body, text_body = MODULE.add_digest_id_footer(
-        "<html><body><td>Please use the original source for verification.</td></tr></body></html>",
-        "Digest preview",
-        "wcf-test-id",
-    )
+    config = MODULE.load_config(ROOT / "config" / "config.yaml")
+    start, end = MODULE.reporting_window("America/Regina", "2026-09-25", "2026-10-02")
+
+    html_body = MODULE.render_html([], config, start, end, "wcf-test-id")
+    text_body = MODULE.render_text([], config, start, end, "wcf-test-id")
 
     assert "Digest ID: wcf-test-id" in html_body
     assert "Digest ID: wcf-test-id" in text_body
+
+
+def test_digest_id_is_absent_when_the_renderer_is_not_given_one():
+    config = MODULE.load_config(ROOT / "config" / "config.yaml")
+    start, end = MODULE.reporting_window("America/Regina", "2026-09-25", "2026-10-02")
+
+    assert "Digest ID" not in MODULE.render_html([], config, start, end)
+    assert "Digest ID" not in MODULE.render_text([], config, start, end)
+
+
+def local_pathway_item(program: dict, received_at: str) -> "MODULE.DigestItem":
+    return MODULE.DigestItem(
+        country=program["country"],
+        country_order=program["country_order"],
+        program_id=program["id"],
+        program_name=program["name"],
+        program_order=program["program_order"],
+        title="Example Producer (1) — LCFS fuel pathway",
+        summary="Certified CI: 1\nPathway Description: example",
+        source_url="file:///D:/WorkSpace/example.xlsx",
+        source_label="Newly Certified Pathways",
+        source_message_id="local:example",
+        received_at=received_at,
+        confidence="high",
+        item_key="example-local-key",
+        source_kind="local_digest",
+        source_item_id="pathway-fields:example",
+        source_group="Newly Certified Pathways",
+    )
+
+
+def test_a_local_item_without_a_public_url_is_never_rendered_as_a_link():
+    config = MODULE.load_config(ROOT / "config" / "config.yaml")
+    start, end = MODULE.reporting_window("America/Regina", "2026-09-25", "2026-10-02")
+    item = local_pathway_item(config["programs"][0], start.isoformat())
+
+    text_body = MODULE.render_text([item], config, start, end)
+    html_body = MODULE.render_html([item], config, start, end)
+
+    assert "Newly Certified Pathway(s)" in text_body
+    assert "file:///" not in text_body
+    assert "file:///" not in html_body
+
+
+def test_a_local_item_with_a_public_url_is_linked_once_in_text():
+    config = MODULE.load_config(ROOT / "config" / "config.yaml")
+    start, end = MODULE.reporting_window("America/Regina", "2026-09-25", "2026-10-02")
+    item = local_pathway_item(config["programs"][0], start.isoformat())
+    item.source_url = "https://example.com/current-pathways_all.xlsx"
+
+    text_body = MODULE.render_text([item], config, start, end)
+
+    assert text_body.count("View original source: https://example.com/current-pathways_all.xlsx") == 1
 
 
 def test_send_uses_digest_id_as_message_id_header():
