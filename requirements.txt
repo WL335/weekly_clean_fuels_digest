@@ -1,0 +1,8 @@
+beautifulsoup4>=4.12,<5
+google-api-python-client>=2.0,<3
+google-auth-httplib2>=0.2,<1
+google-auth-oauthlib>=1.2,<2
+openai>=2.0,<3
+pydantic>=2.7,<3
+PyYAML>=6.0,<7
+tzdata>=2025.2

@@ -1,0 +1,181 @@
+mailbox:
+  account: "wenli.insight@gmail.com"
+  sender: "wenli.insight@gmail.com"
+  recipient: "wenli.insight@gmail.com"
+  subject: "Weekly Clean Fuel Programs Update | {period}"
+
+schedule:
+  timezone: "America/Regina"
+  # The program always summarizes the last completed Friday 00:00 through
+  # Friday 00:00 window, i.e. Friday through Thursday inclusive.
+  weekday: "Friday"
+  time: "09:00"
+
+ai:
+  # Low-cost OpenAI model suited to classification and summarization.
+  model: "gpt-5-nano"
+  summary_language: "English"
+  max_email_characters: 30000
+  retry_attempts: 3
+  request_timeout_seconds: 90
+  # Keep the whole application below Task Scheduler's 60-minute limit.
+  run_timeout_seconds: 3300
+
+paths:
+  gmail_credentials: "runtime/secrets/credentials.json"
+  gmail_token: "runtime/secrets/token.json"
+  state_file: "runtime/state/state.json"
+  log_file: "runtime/logs/weekly_digest.log"
+  preview_directory: "runtime/output"
+  log_max_bytes: 5000000
+  log_backup_count: 5
+
+integrations:
+  # Optional interface to digest files produced by other regulatory programs.
+  # Set to false to run the Gmail-only core workflow.
+  local_digest_enabled: true
+
+local_digest_sources:
+  - id: "california_lcfs_digest_input"
+    program_id: "california_lcfs"
+    directory: "D:/WorkSpace/Code/RegProgram_Automation/program/CA_LCFS/digest_input"
+    pattern: "*.json"
+    timestamp_field: "generated_at"
+    json_program: "CA_LCFS"
+    display_label: "Newly Certified Pathways"
+    public_source_url: "https://ww2.arb.ca.gov/sites/default/files/classic/fuels/lcfs/fuelpathways/current-pathways_all.xlsx"
+  - id: "bc_lcfs_digest_input"
+    program_id: "bc_lcfs"
+    directory: "D:/WorkSpace/Code/RegProgram_Automation/program/BC_LCFS/digest_input"
+    pattern: "*.json"
+    timestamp_field: "generated_at"
+    json_program: "BC_LCFS"
+    display_label: "Guidance Updates"
+
+programs:
+  - id: "california_lcfs"
+    country: "United States"
+    country_order: 1
+    program_order: 1
+    name: "California Low Carbon Fuel Standard (LCFS)"
+    sender: "carb@public.govdelivery.com"
+    mixed_topic: true
+    include_terms:
+      - "California Low Carbon Fuel Standard"
+      - "LCFS"
+      - "LCFS regulation"
+      - "LCFS pathway"
+      - "LCFS credit"
+      - "carbon intensity pathway"
+    exclude_terms:
+      - "Cap-and-Trade"
+      - "Advanced Clean Cars"
+      - "ZEV"
+      - "general air quality"
+
+  - id: "oregon_cfp"
+    country: "United States"
+    country_order: 1
+    program_order: 2
+    name: "Oregon Clean Fuels Program (CFP)"
+    sender: "ordeq@public.govdelivery.com"
+    mixed_topic: true
+    include_terms:
+      - "Oregon Clean Fuels Program"
+      - "Clean Fuels Program"
+      - "CFP"
+      - "clean fuel pathway"
+      - "CFP credit"
+    exclude_terms:
+      - "Climate Protection Program"
+      - "water quality"
+      - "recycling"
+      - "hazardous waste"
+
+  - id: "washington_cfs"
+    country: "United States"
+    country_order: 1
+    program_order: 3
+    name: "Washington Clean Fuel Standard (CFS)"
+    sender: "waecy@public.govdelivery.com"
+    mixed_topic: true
+    include_terms:
+      - "Washington Clean Fuel Standard"
+      - "Clean Fuel Standard"
+      - "CFS"
+      - "clean fuel credits"
+      - "fuel pathway"
+    exclude_terms:
+      - "Cap-and-Invest"
+      - "Climate Commitment Act"
+      - "water quality"
+      - "hazardous waste"
+
+  - id: "new_mexico_ctfp"
+    country: "United States"
+    country_order: 1
+    program_order: 4
+    name: "New Mexico Clean Transportation Fuel Program (CTFP)"
+    senders:
+      - "nmed@public.govdelivery.com"
+      - "cleanfuel.standard@env.nm.gov"
+    mixed_topic: true
+    include_terms:
+      - "New Mexico Clean Transportation Fuel Program"
+      - "Clean Transportation Fuel Program"
+      - "CTFP"
+      - "clean transportation fuel credits"
+      - "fuel pathway"
+    exclude_terms:
+      - "general air quality"
+      - "drinking water"
+      - "solid waste"
+
+  - id: "canada_cfr"
+    country: "Canada"
+    country_order: 2
+    program_order: 1
+    name: "Canada Clean Fuel Regulations (CFR)"
+    sender: "cfsncp@ec.gc.ca"
+    mixed_topic: false
+    include_terms:
+      - "Clean Fuel Regulations"
+      - "CFR"
+      - "Règlement sur les combustibles propres"
+      - "credit market"
+      - "compliance report"
+    exclude_terms: []
+
+  - id: "bc_lcfs"
+    country: "Canada"
+    country_order: 2
+    program_order: 2
+    name: "BC Low Carbon Fuel Standard (LCFS)"
+    sender: "donotreply@gov.bc.ca"
+    mixed_topic: false
+    include_terms:
+      - "BC Low Carbon Fuel Standard"
+      - "Low Carbon Fuels Act"
+      - "BC LCFS"
+      - "compliance credits"
+    exclude_terms: []
+
+  - id: "uk_saf"
+    country: "United Kingdom"
+    country_order: 3
+    program_order: 1
+    name: "UK SAF Mandate"
+    sender: "gov.uk.email@notifications.service.gov.uk"
+    mixed_topic: true
+    include_terms:
+      - "Sustainable Aviation Fuel"
+      - "SAF"
+      - "SAF Mandate"
+      - "UK SAF mandate"
+      - "SAF revenue certainty mechanism"
+      - "SAF certificates"
+    exclude_terms:
+      - "airport expansion"
+      - "aviation safety"
+      - "drones"
+      - "road transport"
