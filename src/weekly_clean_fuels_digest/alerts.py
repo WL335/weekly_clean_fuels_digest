@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -129,13 +130,26 @@ def write_failure_record(project_root: Path, payload: dict) -> AlertOutcome:
 
 POPUP_TITLE = "Weekly Clean Fuels Digest"
 POPUP_TIMEOUT_SECONDS = 60
+POPUP_PROOF_FILENAME = "weekly-clean-fuels-digest-popup.marker"
 
 
-def powershell_popup_command(shell: str, message: str) -> list[str]:
-    """Build a WinForms message box command, used when msg.exe is unavailable."""
+def popup_proof_path() -> Path:
+    """Where the PowerShell popup records that it reached the point of display."""
+    return Path(tempfile.gettempdir()) / POPUP_PROOF_FILENAME
+
+
+def powershell_popup_command(shell: str, message: str, proof_path: Path) -> list[str]:
+    """Build a WinForms message box command, used when msg.exe is unavailable.
+
+    The script writes a proof file immediately before showing the dialog, so a
+    caller that times out can tell "shown but not dismissed" apart from "never got
+    as far as displaying anything".
+    """
     safe = one_line(message, POPUP_TEXT_LIMIT).replace("'", "''")
+    proof = str(proof_path).replace("'", "''")
     script = (
         "Add-Type -AssemblyName System.Windows.Forms;"
+        f"Set-Content -LiteralPath '{proof}' -Value (Get-Date -Format o) -Encoding utf8;"
         f"[System.Windows.Forms.MessageBox]::Show('{safe}','{POPUP_TITLE}','OK','Warning')"
         " | Out-Null"
     )
@@ -148,8 +162,10 @@ def send_popup(message: str, runner=subprocess.run) -> AlertOutcome:
     msg.exe is missing on some Windows editions, so the PowerShell message box is
     the fallback that keeps this channel usable on the production machine. Both
     paths are subprocess calls with a timeout: a dialog nobody dismisses must not
-    hang the run.
+    hang the run. A timeout is only accepted as "shown" when the PowerShell path
+    left its display proof behind, because a stalled process proves nothing.
     """
+    proof_path: Path | None = None
     executable = shutil.which("msg.exe") or shutil.which("msg")
     if executable:
         command = [executable, "*", "/TIME:120", one_line(message, POPUP_TEXT_LIMIT)]
@@ -160,7 +176,12 @@ def send_popup(message: str, runner=subprocess.run) -> AlertOutcome:
             return AlertOutcome(
                 "popup", False, "neither msg.exe nor powershell.exe is available"
             )
-        command = powershell_popup_command(shell, message)
+        proof_path = popup_proof_path()
+        try:
+            proof_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logging.warning("Could not clear the popup proof file %s: %s", proof_path, exc)
+        command = powershell_popup_command(shell, message, proof_path)
         channel = "PowerShell message box (msg.exe is not installed)"
     try:
         completed = runner(
@@ -170,9 +191,14 @@ def send_popup(message: str, runner=subprocess.run) -> AlertOutcome:
             timeout=POPUP_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        # The dialog was displayed; it simply was not dismissed in time.
+        if proof_path is not None and proof_path.exists():
+            return AlertOutcome(
+                "popup",
+                True,
+                f"{channel}: shown, not acknowledged within {POPUP_TIMEOUT_SECONDS}s",
+            )
         return AlertOutcome(
-            "popup", True, f"{channel}: shown, not acknowledged within {POPUP_TIMEOUT_SECONDS}s"
+            "popup", False, f"{channel}: timed out before the dialog was displayed"
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return AlertOutcome("popup", False, str(exc))

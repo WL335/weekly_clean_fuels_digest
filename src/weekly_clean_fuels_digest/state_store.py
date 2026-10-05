@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 STATE_SCHEMA_VERSION = 1
 IDENTITY_VERSION = {"email": 1, "local_digest": 2}
+
+
+def is_aware_iso_timestamp(value: object) -> bool:
+    """True for an ISO 8601 string that carries a timezone.
+
+    A timestamp without a timezone cannot be compared with the reporting window, so
+    accepting one would push a type error into whichever code compares it later.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def new_state() -> dict:
@@ -50,10 +66,12 @@ def validate_state(state: object, path: Path) -> dict:
     for key, transaction in state["send_transactions"].items():
         if transaction.get("status") not in valid_statuses:
             raise RuntimeError(f"Invalid send transaction status for {key!r}: {path}")
-        if not isinstance(transaction.get("period_start"), str) or not isinstance(
-            transaction.get("period_end"), str
-        ):
-            raise RuntimeError(f"Invalid send transaction period for {key!r}: {path}")
+        for field in ("period_start", "period_end"):
+            if not is_aware_iso_timestamp(transaction.get(field)):
+                raise RuntimeError(
+                    f"Send transaction {key!r} needs a timezone-aware ISO "
+                    f"{field}: {path}"
+                )
         items = transaction.get("items", [])
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
             raise RuntimeError(f"Invalid send transaction items for {key!r}: {path}")
@@ -61,6 +79,16 @@ def validate_state(state: object, path: Path) -> dict:
             required_fields = ("item_key", "title", "program_id", "source_url")
             if any(not isinstance(item.get(field), str) for field in required_fields):
                 raise RuntimeError(f"Malformed item in send transaction {key!r}: {path}")
+    last_run = state.get("last_run")
+    if last_run is not None:
+        if not isinstance(last_run, dict):
+            raise RuntimeError(f"State field 'last_run' must be an object: {path}")
+        for field in ("period_start", "period_end"):
+            if field in last_run and not is_aware_iso_timestamp(last_run[field]):
+                raise RuntimeError(
+                    f"State field 'last_run.{field}' must be a timezone-aware ISO "
+                    f"timestamp: {path}"
+                )
     return state
 
 

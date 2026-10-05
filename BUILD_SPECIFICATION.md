@@ -573,7 +573,7 @@ A rebuilt implementation is equivalent only after all of these pass:
 30. Malformed state/config structures fail at startup with actionable errors.
 31. Gmail and OpenAI request timeouts and the overall run budget are enforced; logs rotate within configured limits.
 32. The state CLI can resolve a pending transaction as sent or not-sent without sending mail.
-33. Every enabled notification channel is attempted on failure, each channel records whether it succeeded, and the exit code distinguishes configuration or credential failures (2) from runtime failures (1).
+33. Every enabled notification channel is attempted on failure, each channel records whether it succeeded, and the exit code distinguishes startup and configuration failures (2), including a missing API key, from failures raised during the run (1), including provider and credential errors.
 34. The watchdog reports a period as missing only after the configured grace period, does not accept an earlier period's send as evidence, reports an unresolved pending transaction as its own case, and notifies at most once per missed period.
 35. `--test-alert` delivers a notification through the enabled channels without sending mail and without changing state.
 36. Both renderers accept the digest ID as an argument. A rendered body contains the digest ID only when it is supplied, and no caller rewrites rendered markup to insert it.
@@ -583,6 +583,8 @@ A rebuilt implementation is equivalent only after all of these pass:
 40. A failure of any exception type aborts the run, returns the runtime exit code, and attempts notification; a Google auth `RefreshError` in particular is covered.
 41. A watchdog that cannot read its configuration or state notifies instead of exiting quietly. An alert that reached no notification channel is not recorded, so the next check retries, and `--test-alert` returns a failure code when nothing was delivered.
 42. A record whose period start is later than the expected start does not satisfy the weekly check, an earlier catch-up start does, and with `alerts.watchdog_armed_from` set a watchdog with no history alerts instead of staying silent.
+43. State validation rejects a period timestamp that is not timezone-aware, a send record with a naive timestamp cannot prove delivery, and an unexpected failure anywhere in the watchdog flow still notifies instead of escaping silently.
+44. A message box that times out counts as a delivered notification only when the display proof exists; otherwise it counts as undelivered so the alert is retried.
 
 ## 19. Rebuild Procedure
 

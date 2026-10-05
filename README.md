@@ -258,11 +258,11 @@ The digest is the only thing that reports a week's regulatory activity, so a wee
 
 **The run reports its own failure.** When the weekly run fails, the application writes `runtime\state\last_failure.json` and, in send mode, tries three notification channels that do not use Gmail:
 
-- a message box — through `msg.exe` when it is installed, otherwise through a PowerShell message box; it needs you to be logged in;
+- a message box — through `msg.exe` when it is installed, otherwise through a PowerShell message box; it needs you to be logged in, and a box that times out counts as delivered only when it actually reached the point of display;
 - a date-stamped file on your Desktop, `Weekly Digest ALERT <date>.txt` — survives a closed session, and it is the only channel that works with nobody logged in;
 - an entry in the Windows Application event log (`eventcreate.exe`) — disabled by default, because it needs an elevated task and otherwise fails with `Access is denied`.
 
-Every channel records whether it worked, so `runtime\logs\weekly_digest.log` and the console output state which notifications you can expect to have seen. The process exit code distinguishes the failure kind in Task Scheduler history: `0` success, `1` runtime failure, `2` configuration or credential failure.
+Every channel records whether it worked, so `runtime\logs\weekly_digest.log` and the console output state which notifications you can expect to have seen. The process exit code distinguishes the failure kind in Task Scheduler history: `0` success, `1` a failure raised during the run (including a Gmail or OpenAI credential error), `2` a startup failure such as a missing or invalid configuration, a missing `OPENAI_API_KEY`, or unusable state.
 
 **The watchdog checks delivery independently.** `scripts\run_watchdog.bat` runs from its own scheduled task every Saturday at 09:00. It sends no mail, does not need `OPENAI_API_KEY`, and answers one question: did the digest for the period that ended on Friday actually go out? Four rules keep that answer honest:
 

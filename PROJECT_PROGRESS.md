@@ -81,6 +81,9 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Broadened the run failure handler to every exception, so provider credential errors such as `google.auth.exceptions.RefreshError` are reported through the alert channels instead of escaping as a bare traceback.
 - [x] Made the watchdog alert when it cannot read its own configuration or state, retry an alert that reached no notification channel, and report a failed `--test-alert` as a failure instead of success.
 - [x] Made the watchdog require a record that covers the whole reporting week, and added `alerts.watchdog_armed_from` so a lost state file or a never-successful first automatic send can no longer suppress alerts indefinitely.
+- [x] Required period timestamps in state to be timezone-aware at validation, and made the watchdog treat an unprovable record as unaccounted for rather than letting a naive-versus-aware comparison escape the check.
+- [x] Added a last-resort guard around the whole watchdog flow, so any unexpected failure still notifies through the alert channels.
+- [x] Required display proof before a timed-out message box counts as a delivered notification.
 
 ## Current Runtime Configuration
 
@@ -175,7 +178,9 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - A Gmail credential failure (`RefreshError`) aborts the run with exit code 1 and writes a failure record naming the stage, rather than escaping with no notification.
 - The watchdog notifies when it cannot read its own configuration or state; when no channel delivers an alert it leaves the period unmarked so the next check retries; and a `--test-alert` that reaches nobody returns exit code 4 instead of success.
 - A one-day report does not satisfy the weekly delivery check while a longer catch-up report does, and with `alerts.watchdog_armed_from` set a watchdog with no send history at all still alerts.
-- The offline suite passes 70 tests (run `pytest -q` for the current count).
+- A timezone-naive timestamp in state is rejected at load with an actionable error, and a naive send record cannot prove delivery without silencing the watchdog.
+- A message box that times out without display proof counts as undelivered, so the alert is retried instead of being recorded as handled.
+- The offline suite passes 75 tests (run `pytest -q` for the current count).
 
 ## Known Constraints
 

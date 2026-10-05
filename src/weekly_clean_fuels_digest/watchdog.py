@@ -139,10 +139,23 @@ def covers_expected_period(
     Both bounds are checked, because a manual one-day report whose end date is the
     period end must not be accepted as the full week. A longer catch-up run (an
     earlier start) still counts: it did cover the week.
+
+    A timestamp without a timezone cannot be compared with the reporting window at
+    all. Such a record is reported as unproven instead of raising, because an
+    exception here would escape the caller and silence the watchdog.
     """
     start = parse_timestamp(record.get("period_start"))
     end = parse_timestamp(record.get("period_end"))
-    return end == period_end and start is not None and start <= expected_start
+    if start is None or end is None:
+        return False
+    if start.tzinfo is None or end.tzinfo is None:
+        logging.warning(
+            "Ignoring a send record with a timezone-naive timestamp: %r / %r",
+            record.get("period_start"),
+            record.get("period_end"),
+        )
+        return False
+    return end == period_end and start <= expected_start
 
 
 def evaluate(
@@ -295,8 +308,7 @@ def resolve_now(args: argparse.Namespace, tz: ZoneInfo) -> datetime:
     return parsed.astimezone(tz)
 
 
-def main() -> int:
-    args = parse_args()
+def _run_watchdog(args: argparse.Namespace) -> int:
     settings = AlertSettings()
     armed_from: date | None = None
     try:
@@ -403,6 +415,33 @@ def main() -> int:
     mark_alerted(bookkeeping, verdict.period_end, now)
     save_watchdog_state(ROOT, bookkeeping)
     return EXIT_ALERT
+
+
+def main() -> int:
+    """Last-resort guard: whatever stage breaks, the watchdog must say so.
+
+    The named stages report their own failures with the configuration that was
+    loaded. This wrapper only catches what escapes them, using default alert
+    settings, so an unexpected comparison error cannot turn the check silent.
+    """
+    args = parse_args()
+    try:
+        return _run_watchdog(args)
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        print(f"WATCHDOG ERROR: {detail}", file=sys.stderr)
+        logging.exception("Watchdog failed unexpectedly")
+        report_problem(
+            project_root=ROOT,
+            title="Weekly Clean Fuels Digest watchdog could not finish",
+            message=(
+                "The delivery check failed after it started, so nothing is known "
+                "about whether this period's digest went out.\n\n" + detail
+            ),
+            settings=AlertSettings(),
+            context={"mode": "watchdog-error"},
+        )
+        return EXIT_CONFIG_ERROR
 
 
 if __name__ == "__main__":

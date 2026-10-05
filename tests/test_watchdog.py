@@ -234,6 +234,49 @@ def test_an_unarmed_watchdog_stays_quiet_when_no_history_exists():
     assert verdict.alert_required is False
 
 
+def test_a_timezone_naive_record_cannot_prove_delivery():
+    """Comparing a naive timestamp with the window used to raise out of the check."""
+    state = {
+        "sent_items": {"key": {}},
+        "send_transactions": {
+            "wcf-naive": {
+                "status": "sent",
+                "period_start": "2026-09-25T00:00:00",
+                "period_end": "2026-10-02T00:00:00",
+            }
+        },
+    }
+
+    verdict = watchdog.evaluate(state, now=datetime(2026, 10, 3, 9, 0, tzinfo=TZ))
+
+    assert verdict.status == watchdog.STATUS_MISSING
+    assert verdict.alert_required is True
+
+
+def test_watchdog_reports_an_unexpected_failure_in_its_own_flow(tmp_path, monkeypatch):
+    config_path = write_watchdog_config(tmp_path)
+    monkeypatch.setattr(watchdog, "ROOT", tmp_path)
+    monkeypatch.setattr(watchdog, "parse_args", lambda: watchdog_args(config_path))
+    monkeypatch.setattr(
+        watchdog, "load_state", lambda config, root: {"sent_items": {"key": {}}}
+    )
+    calls = []
+
+    def explode(*args, **kwargs):
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+
+    monkeypatch.setattr(watchdog, "evaluate", explode)
+    monkeypatch.setattr(
+        watchdog, "report_problem", lambda **kwargs: calls.append(kwargs) or []
+    )
+
+    code = watchdog.main()
+
+    assert code == watchdog.EXIT_CONFIG_ERROR
+    assert calls, "an unexpected failure must still notify"
+    assert "could not finish" in calls[0]["title"]
+
+
 def write_watchdog_config(tmp_path: Path) -> Path:
     path = tmp_path / "config.yaml"
     path.write_text(

@@ -115,7 +115,9 @@ def test_popup_escapes_apostrophes_for_powershell(monkeypatch):
     assert "operator''s" in runner.calls[0][0][-1]
 
 
-def test_popup_that_is_never_dismissed_still_counts_as_shown(monkeypatch):
+def test_a_timed_out_popup_without_display_proof_is_not_a_notification(monkeypatch, tmp_path):
+    """A stalled process proves nothing: only the proof file shows it was displayed."""
+
     def timing_out(command, **kwargs):
         raise alerts.subprocess.TimeoutExpired(command, alerts.POPUP_TIMEOUT_SECONDS)
 
@@ -124,6 +126,28 @@ def test_popup_that_is_never_dismissed_still_counts_as_shown(monkeypatch):
         "which",
         lambda name: "powershell.exe" if "powershell" in name else None,
     )
+    monkeypatch.setattr(alerts, "popup_proof_path", lambda: tmp_path / "popup.marker")
+
+    outcome = alerts.send_popup("digest failed", runner=timing_out)
+
+    assert outcome.ok is False
+    assert "before the dialog was displayed" in outcome.detail
+
+
+def test_a_timed_out_popup_with_display_proof_counts_as_shown(monkeypatch, tmp_path):
+    proof = tmp_path / "popup.marker"
+
+    def timing_out(command, **kwargs):
+        # The script reached the point of displaying the dialog, then hung.
+        proof.write_text("shown", encoding="utf-8")
+        raise alerts.subprocess.TimeoutExpired(command, alerts.POPUP_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(
+        alerts.shutil,
+        "which",
+        lambda name: "powershell.exe" if "powershell" in name else None,
+    )
+    monkeypatch.setattr(alerts, "popup_proof_path", lambda: proof)
 
     outcome = alerts.send_popup("digest failed", runner=timing_out)
 
