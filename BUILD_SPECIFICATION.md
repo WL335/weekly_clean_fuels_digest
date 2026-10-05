@@ -584,7 +584,7 @@ A rebuilt implementation is equivalent only after all of these pass:
 41. A watchdog that cannot read its configuration or state notifies instead of exiting quietly. An alert that reached no notification channel is not recorded, so the next check retries, and `--test-alert` returns a failure code when nothing was delivered.
 42. A record whose period start is later than the expected start does not satisfy the weekly check, an earlier catch-up start does, and with `alerts.watchdog_armed_from` set a watchdog with no history alerts instead of staying silent.
 43. State validation rejects a period timestamp that is not timezone-aware, a send record with a naive timestamp cannot prove delivery, and an unexpected failure anywhere in the watchdog flow still notifies instead of escaping silently.
-44. A message box that times out counts as a delivered notification only when the display proof exists; otherwise it counts as undelivered so the alert is retried.
+44. A message box that is not acknowledged within its timeout is never counted as delivered, and no shared side channel may let one call's outcome decide another's.
 
 ## 19. Rebuild Procedure
 

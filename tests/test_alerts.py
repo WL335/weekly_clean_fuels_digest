@@ -115,9 +115,7 @@ def test_popup_escapes_apostrophes_for_powershell(monkeypatch):
     assert "operator''s" in runner.calls[0][0][-1]
 
 
-def test_a_timed_out_popup_without_display_proof_is_not_a_notification(monkeypatch, tmp_path):
-    """A stalled process proves nothing: only the proof file shows it was displayed."""
-
+def test_a_popup_timeout_is_never_treated_as_delivered(monkeypatch):
     def timing_out(command, **kwargs):
         raise alerts.subprocess.TimeoutExpired(command, alerts.POPUP_TIMEOUT_SECONDS)
 
@@ -126,33 +124,26 @@ def test_a_timed_out_popup_without_display_proof_is_not_a_notification(monkeypat
         "which",
         lambda name: "powershell.exe" if "powershell" in name else None,
     )
-    monkeypatch.setattr(alerts, "popup_proof_path", lambda: tmp_path / "popup.marker")
 
     outcome = alerts.send_popup("digest failed", runner=timing_out)
 
     assert outcome.ok is False
-    assert "before the dialog was displayed" in outcome.detail
+    assert "unconfirmed" in outcome.detail
 
 
-def test_a_timed_out_popup_with_display_proof_counts_as_shown(monkeypatch, tmp_path):
-    proof = tmp_path / "popup.marker"
-
-    def timing_out(command, **kwargs):
-        # The script reached the point of displaying the dialog, then hung.
-        proof.write_text("shown", encoding="utf-8")
-        raise alerts.subprocess.TimeoutExpired(command, alerts.POPUP_TIMEOUT_SECONDS)
-
+def test_an_earlier_popup_success_cannot_make_a_later_timeout_count(monkeypatch):
+    """No shared side channel: each call is judged on its own outcome."""
     monkeypatch.setattr(
         alerts.shutil,
         "which",
         lambda name: "powershell.exe" if "powershell" in name else None,
     )
-    monkeypatch.setattr(alerts, "popup_proof_path", lambda: proof)
+    assert alerts.send_popup("first", runner=RecordingRunner()).ok is True
 
-    outcome = alerts.send_popup("digest failed", runner=timing_out)
+    def timing_out(command, **kwargs):
+        raise alerts.subprocess.TimeoutExpired(command, alerts.POPUP_TIMEOUT_SECONDS)
 
-    assert outcome.ok is True
-    assert "not acknowledged" in outcome.detail
+    assert alerts.send_popup("second", runner=timing_out).ok is False
 
 
 def test_event_log_uses_the_project_source_and_id(monkeypatch):

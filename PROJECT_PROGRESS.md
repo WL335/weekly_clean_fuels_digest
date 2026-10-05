@@ -84,6 +84,7 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Required period timestamps in state to be timezone-aware at validation, and made the watchdog treat an unprovable record as unaccounted for rather than letting a naive-versus-aware comparison escape the check.
 - [x] Added a last-resort guard around the whole watchdog flow, so any unexpected failure still notifies through the alert channels.
 - [x] Required display proof before a timed-out message box counts as a delivered notification.
+- [x] Removed that shared display-proof file again: a timeout is now always unconfirmed, so a stale or concurrently written marker can no longer make an undelivered alert look delivered, and the retry stays in place unless another channel delivers.
 
 ## Current Runtime Configuration
 
@@ -110,7 +111,7 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 | Failure alerts | `msg.exe` popup, Desktop marker file, Windows event log (all enabled) |
 | Watchdog schedule | Every Saturday at 09:00 local time |
 | Watchdog grace period | 6 hours after the scheduled Friday 09:00 send (`alerts.grace_hours`) |
-| Process exit codes | `0` success, `1` runtime failure, `2` configuration/credential failure, `3` watchdog alert |
+| Process exit codes | `0` success; `1` failure during the run, including credential errors; `2` startup or configuration failure, including a missing API key; `3` watchdog alert; `4` watchdog alert undelivered |
 | California LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\CA_LCFS\digest_input` |
 | BC LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\BC_LCFS\digest_input` |
 | Source-link label | `View original source →` |
@@ -179,7 +180,7 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - The watchdog notifies when it cannot read its own configuration or state; when no channel delivers an alert it leaves the period unmarked so the next check retries; and a `--test-alert` that reaches nobody returns exit code 4 instead of success.
 - A one-day report does not satisfy the weekly delivery check while a longer catch-up report does, and with `alerts.watchdog_armed_from` set a watchdog with no send history at all still alerts.
 - A timezone-naive timestamp in state is rejected at load with an actionable error, and a naive send record cannot prove delivery without silencing the watchdog.
-- A message box that times out without display proof counts as undelivered, so the alert is retried instead of being recorded as handled.
+- A message box that is not acknowledged within its timeout is reported as unconfirmed, and an earlier successful popup cannot make a later timeout count.
 - The offline suite passes 75 tests (run `pytest -q` for the current count).
 
 ## Known Constraints

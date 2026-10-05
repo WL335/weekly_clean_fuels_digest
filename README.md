@@ -258,7 +258,7 @@ The digest is the only thing that reports a week's regulatory activity, so a wee
 
 **The run reports its own failure.** When the weekly run fails, the application writes `runtime\state\last_failure.json` and, in send mode, tries three notification channels that do not use Gmail:
 
-- a message box — through `msg.exe` when it is installed, otherwise through a PowerShell message box; it needs you to be logged in, and a box that times out counts as delivered only when it actually reached the point of display;
+- a message box — through `msg.exe` when it is installed, otherwise through a PowerShell message box; it needs you to be logged in, and a dialog that is not dismissed within a minute counts as unconfirmed rather than delivered;
 - a date-stamped file on your Desktop, `Weekly Digest ALERT <date>.txt` — survives a closed session, and it is the only channel that works with nobody logged in;
 - an entry in the Windows Application event log (`eventcreate.exe`) — disabled by default, because it needs an elevated task and otherwise fails with `Access is denied`.
 
