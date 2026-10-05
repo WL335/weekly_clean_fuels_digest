@@ -66,6 +66,21 @@ class AlertOutcome:
     detail: str = ""
 
 
+NOTIFICATION_CHANNELS = frozenset({"popup", "desktop_marker", "event_log"})
+
+
+def notified(outcomes: list[AlertOutcome]) -> bool:
+    """True when at least one channel that reaches a human delivered.
+
+    ``failure_record`` deliberately does not count: it preserves the evidence, but
+    a file nobody opens is not a notification. Callers use this to decide whether
+    an alert may be recorded as handled, or must be retried.
+    """
+    return any(
+        outcome.ok and outcome.channel in NOTIFICATION_CHANNELS for outcome in outcomes
+    )
+
+
 def one_line(text: str, limit: int | None = None) -> str:
     collapsed = " ".join(text.split())
     return collapsed if limit is None else collapsed[:limit]

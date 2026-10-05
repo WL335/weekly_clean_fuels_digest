@@ -32,6 +32,7 @@ A conforming implementation must:
 16. Merge configured local regulatory digest files into the same program and reporting period.
 17. Report every failed run through notification channels that do not depend on the mail transport, and distinguish a configuration or credential failure from a runtime failure in the process exit code.
 18. Run an independent delivery watchdog on its own schedule, using no mail transport. It must judge the expected period by that period's recorded send transaction rather than by recent activity, allow a configurable grace period after the scheduled send time, and alert at most once per missed period.
+19. Never exit without attempting to notify: no failure path, including a provider credential error of an unforeseen exception type and a watchdog that cannot read its own configuration or state, may end silently. An alert that reached no notification channel must not be recorded as delivered.
 
 ## 3. Current Business Scope
 
@@ -156,6 +157,7 @@ Required semantics:
 - `ai.run_timeout_seconds`: overall runtime budget, below the scheduler's execution limit.
 - `alerts.popup_enabled`, `alerts.desktop_marker_enabled`, `alerts.event_log_enabled`: independent failure-notification channels.
 - `alerts.grace_hours`: hours after the scheduled send time before the watchdog reports the period as missing.
+- `alerts.watchdog_armed_from`: earliest period end (`YYYY-MM-DD`) that must alert even when no send history exists, or empty for the lenient behaviour.
 - `paths.*`: project-relative credential, token, state, log, and preview paths.
 - `programs`: ordered regulatory-program definitions.
 
@@ -578,6 +580,9 @@ A rebuilt implementation is equivalent only after all of these pass:
 37. A local item whose source URL is not public renders without a link in both HTML and plain text.
 38. Continuous integration runs the offline suite on every push with no Gmail access, no delivery, and no production key, and fails when credentials are tracked.
 39. Both formats derive subsection order, multiline handling, and link scope from a single section definition. Adding a subsection requires one entry there, the California pathway groups continue to share exactly one link, and rendering is covered by snapshots taken against a frozen fixture configuration rather than the live inventory.
+40. A failure of any exception type aborts the run, returns the runtime exit code, and attempts notification; a Google auth `RefreshError` in particular is covered.
+41. A watchdog that cannot read its configuration or state notifies instead of exiting quietly. An alert that reached no notification channel is not recorded, so the next check retries, and `--test-alert` returns a failure code when nothing was delivered.
+42. A record whose period start is later than the expected start does not satisfy the weekly check, an earlier catch-up start does, and with `alerts.watchdog_armed_from` set a watchdog with no history alerts instead of staying silent.
 
 ## 19. Rebuild Procedure
 

@@ -264,7 +264,14 @@ The digest is the only thing that reports a week's regulatory activity, so a wee
 
 Every channel records whether it worked, so `runtime\logs\weekly_digest.log` and the console output state which notifications you can expect to have seen. The process exit code distinguishes the failure kind in Task Scheduler history: `0` success, `1` runtime failure, `2` configuration or credential failure.
 
-**The watchdog checks delivery independently.** `scripts\run_watchdog.bat` runs from its own scheduled task every Saturday at 09:00. It sends no mail, does not need `OPENAI_API_KEY`, and answers one question: did the digest for the period that ended on Friday actually go out? It compares the expected period against the recorded send transaction, so an earlier week's send or a manual test send cannot mask a missing delivery. A period is reported only after the scheduled send time plus `alerts.grace_hours` (six hours by default), and each missed period is reported once. Its exit codes are `0` nothing wrong, `2` configuration problem, `3` a digest is missing or blocked. Bookkeeping lives in `runtime\state\watchdog.json`, separate from the digest's own state.
+**The watchdog checks delivery independently.** `scripts\run_watchdog.bat` runs from its own scheduled task every Saturday at 09:00. It sends no mail, does not need `OPENAI_API_KEY`, and answers one question: did the digest for the period that ended on Friday actually go out? Four rules keep that answer honest:
+
+- A period counts as delivered only if the recorded send covers the whole week. A shorter one-off report whose end date happens to match does not mask a missing weekly digest, while a longer catch-up run still counts.
+- A period is reported only after the scheduled send time plus `alerts.grace_hours` (six hours by default), and each missed period is reported once.
+- If no notification channel delivers, the period is deliberately left unmarked so the next check retries. If the watchdog cannot read its own configuration or state, it alerts rather than exiting quietly.
+- `alerts.watchdog_armed_from` names the earliest period end that must alert even when there is no send history at all. That is what makes a lost `state.json`, or a first automatic send that never succeeded, visible instead of silent.
+
+Its exit codes are `0` nothing wrong, `2` configuration problem, `3` a digest is missing or blocked, `4` the alert itself could not be delivered. Bookkeeping lives in `runtime\state\watchdog.json`, separate from the digest's own state.
 
 Verify the channels once, before relying on them:
 
@@ -272,7 +279,7 @@ Verify the channels once, before relying on them:
 scripts\run_watchdog.bat --test-alert
 ```
 
-This sends a test notification through every enabled channel without sending mail and without changing state. If a channel does not reach you, switch it off under `alerts:` in `config\config.yaml` rather than leaving one that only looks like it works.
+This sends a test notification through every enabled channel without sending mail and without changing state. It exits non-zero when no channel reached anybody, so a zero exit means the notification really arrived. If a channel does not reach you, switch it off under `alerts:` in `config\config.yaml` rather than leaving one that only looks like it works.
 
 Limitation: the watchdog runs on the same computer as the digest. If the computer is off, or nobody is logged in, for a whole period, no local check can report it; that case would need an off-machine heartbeat.
 

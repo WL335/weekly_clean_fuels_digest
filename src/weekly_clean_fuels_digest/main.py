@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 from logging.handlers import RotatingFileHandler
 
 import yaml
-from googleapiclient.errors import HttpError
 
 from .alerts import AlertSettings, clear_failure_record, report_failure
 from .digest_renderer import human_period, render_html, render_text
@@ -153,6 +152,15 @@ def load_config(path: Path) -> dict:
             raise ValueError
     except (TypeError, ValueError) as exc:
         raise ValueError("Configuration alerts.grace_hours must be positive.") from exc
+    armed_from = alerts.get("watchdog_armed_from")
+    if armed_from not in (None, ""):
+        try:
+            date.fromisoformat(str(armed_from))
+        except ValueError as exc:
+            raise ValueError(
+                "Configuration alerts.watchdog_armed_from must be a YYYY-MM-DD date "
+                "or empty."
+            ) from exc
     sources = config.get("local_digest_sources", [])
     if not isinstance(sources, list):
         raise ValueError("Configuration local_digest_sources must be a list.")
@@ -598,7 +606,11 @@ def main() -> int:
             logging.info("Preview mode complete; no email sent and state was not changed.")
         clear_failure_record(ROOT)
         return 0
-    except (HttpError, OSError, ValueError, RuntimeError) as exc:
+    except Exception as exc:
+        # Deliberately broad: lazily loaded provider libraries raise their own types
+        # (for example google.auth.exceptions.RefreshError, which is none of OSError,
+        # ValueError, or RuntimeError), and an unattended weekly job must never fail
+        # without notifying the operator.
         logging.exception("Weekly digest failed")
         return fail(exc, EXIT_RUNTIME_FAILURE)
 

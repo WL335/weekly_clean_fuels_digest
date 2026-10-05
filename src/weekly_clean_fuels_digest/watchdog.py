@@ -15,7 +15,8 @@ Design rules:
   there any activity in the last seven days": a manual test send must not mask a
   missing scheduled delivery.
 * Exit codes: ``0`` nothing wrong, ``2`` configuration problem, ``3`` the
-  expected digest is missing (or blocked by a pending transaction).
+  expected digest is missing (or blocked by a pending transaction), ``4`` the
+  alert itself could not be delivered through any channel.
 """
 
 from __future__ import annotations
@@ -25,11 +26,11 @@ import json
 import logging
 import sys
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .alerts import AlertSettings, report_problem
+from .alerts import AlertSettings, notified, report_problem
 from .main import load_config, setup_logging
 from .state_store import load_state
 
@@ -43,9 +44,14 @@ STATUS_UNINITIALIZED = "uninitialized"
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_ALERT = 3
+EXIT_ALERT_UNDELIVERED = 4
 
 DEFAULT_SCHEDULE_TIME = "09:00"
 DEFAULT_GRACE_HOURS = 6.0
+# The digest reports a whole Friday-to-Friday week. A shorter manual report must
+# not be mistaken for it; a longer catch-up run still counts, because it covered
+# the week.
+EXPECTED_PERIOD_DAYS = 7
 
 
 @dataclass
@@ -113,29 +119,64 @@ def parse_timestamp(value: object) -> datetime | None:
         return None
 
 
+def parse_armed_from(config: dict) -> date | None:
+    """Earliest period end that must alert even when no history exists at all."""
+    raw = (config.get("alerts") or {}).get("watchdog_armed_from")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError:
+        logging.warning("Ignoring unreadable alerts.watchdog_armed_from %r.", raw)
+        return None
+
+
+def covers_expected_period(
+    record: dict, expected_start: datetime, period_end: datetime
+) -> bool:
+    """True when a record accounts for at least the expected reporting week.
+
+    Both bounds are checked, because a manual one-day report whose end date is the
+    period end must not be accepted as the full week. A longer catch-up run (an
+    earlier start) still counts: it did cover the week.
+    """
+    start = parse_timestamp(record.get("period_start"))
+    end = parse_timestamp(record.get("period_end"))
+    return end == period_end and start is not None and start <= expected_start
+
+
 def evaluate(
     state: dict,
     *,
     now: datetime,
     schedule_time: str = DEFAULT_SCHEDULE_TIME,
     grace_hours: float = DEFAULT_GRACE_HOURS,
+    armed_from: date | None = None,
 ) -> Verdict:
     """Decide whether this period's digest is accounted for."""
     period_end = expected_period_end(now)
+    expected_start = period_end - timedelta(days=EXPECTED_PERIOD_DAYS)
     expected_send_at = scheduled_send_time(period_end, schedule_time)
     deadline = expected_send_at + timedelta(hours=grace_hours)
 
     transactions = state.get("send_transactions") or {}
     if not isinstance(transactions, dict):
         transactions = {}
-    matching = [
+    # Anything recorded against this period's end date, used to spot a stuck send.
+    for_period = [
         transaction
         for transaction in transactions.values()
         if isinstance(transaction, dict)
         and parse_timestamp(transaction.get("period_end")) == period_end
     ]
+    # Only records that cover the whole week count as a delivery.
+    delivered = [
+        transaction
+        for transaction in for_period
+        if covers_expected_period(transaction, expected_start, period_end)
+    ]
 
-    if any(transaction.get("status") == "sent" for transaction in matching):
+    if any(transaction.get("status") == "sent" for transaction in delivered):
         return Verdict(
             STATUS_OK,
             f"Digest for the period ending {period_end.date()} was sent.",
@@ -144,7 +185,9 @@ def evaluate(
         )
 
     last_run = state.get("last_run") or {}
-    if isinstance(last_run, dict) and parse_timestamp(last_run.get("period_end")) == period_end:
+    if isinstance(last_run, dict) and covers_expected_period(
+        last_run, expected_start, period_end
+    ):
         return Verdict(
             STATUS_OK,
             f"Last recorded send covers the period ending {period_end.date()}.",
@@ -160,7 +203,7 @@ def evaluate(
             expected_send_at,
         )
 
-    if any(transaction.get("status") == "sending" for transaction in matching):
+    if any(transaction.get("status") == "sending" for transaction in for_period):
         return Verdict(
             STATUS_PENDING,
             "An unresolved send transaction is blocking automatic delivery; "
@@ -171,6 +214,18 @@ def evaluate(
         )
 
     if not transactions and not (state.get("sent_items") or {}) and not last_run:
+        if armed_from is not None and period_end.date() >= armed_from:
+            # Without this, a lost state file, or a first automatic send that never
+            # succeeded, would keep the watchdog quiet indefinitely.
+            return Verdict(
+                STATUS_MISSING,
+                f"No send history exists at all and the watchdog has been armed "
+                f"since {armed_from.isoformat()}, so the digest for the period "
+                f"ending {period_end.date()} cannot be accounted for.",
+                period_end,
+                expected_send_at,
+                True,
+            )
         return Verdict(
             STATUS_UNINITIALIZED,
             "No send history found yet, so there is nothing to compare against.",
@@ -243,24 +298,40 @@ def resolve_now(args: argparse.Namespace, tz: ZoneInfo) -> datetime:
 def main() -> int:
     args = parse_args()
     settings = AlertSettings()
+    armed_from: date | None = None
     try:
         config = load_config(args.config)
         setup_logging(config)
         settings = AlertSettings.from_config(config)
+        armed_from = parse_armed_from(config)
         timezone_name = config["schedule"].get("timezone", "America/Regina")
         tz = ZoneInfo(timezone_name)
         now = resolve_now(args, tz)
         schedule_time = str(config["schedule"].get("time", DEFAULT_SCHEDULE_TIME))
         state = load_state(config, ROOT)
     except Exception as exc:
-        print(f"WATCHDOG CONFIG ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # A watchdog that cannot run is itself the emergency, so it reports through
+        # the same channels, using default settings when the configuration is what
+        # broke. Staying quiet here is what makes a corrupt state file invisible.
+        detail = f"{type(exc).__name__}: {exc}"
+        print(f"WATCHDOG CONFIG ERROR: {detail}", file=sys.stderr)
+        report_problem(
+            project_root=ROOT,
+            title="Weekly Clean Fuels Digest watchdog could not run",
+            message=(
+                "The delivery check failed before it could judge this period, so "
+                "nothing is known about whether the digest went out.\n\n" + detail
+            ),
+            settings=settings,
+            context={"mode": "watchdog-config-error"},
+        )
         return EXIT_CONFIG_ERROR
 
     if args.grace_hours is not None:
         settings.grace_hours = args.grace_hours
 
     if args.test_alert:
-        report_problem(
+        outcomes = report_problem(
             project_root=ROOT,
             title="Weekly Clean Fuels Digest alert test",
             message=(
@@ -272,11 +343,23 @@ def main() -> int:
             timezone_name=timezone_name,
             write_record=False,
         )
-        print("Test notification sent through the enabled channels.")
-        return EXIT_OK
+        if notified(outcomes):
+            delivered = ", ".join(outcome.channel for outcome in outcomes if outcome.ok)
+            print(f"Test notification delivered through: {delivered}")
+            return EXIT_OK
+        print(
+            "Test notification did NOT reach any channel. Do not rely on these "
+            "channels until this succeeds; see the log for each channel outcome.",
+            file=sys.stderr,
+        )
+        return EXIT_ALERT_UNDELIVERED
 
     verdict = evaluate(
-        state, now=now, schedule_time=schedule_time, grace_hours=settings.grace_hours
+        state,
+        now=now,
+        schedule_time=schedule_time,
+        grace_hours=settings.grace_hours,
+        armed_from=armed_from,
     )
     logging.info("Watchdog check: %s - %s", verdict.status, verdict.message)
     print(f"{verdict.status}: {verdict.message}")
@@ -289,7 +372,7 @@ def main() -> int:
         print(f"Already reported for {verdict.period_end.date()}; not notifying again.")
         return EXIT_ALERT
 
-    report_problem(
+    outcomes = report_problem(
         project_root=ROOT,
         title="Weekly Clean Fuels Digest was not delivered",
         message=(
@@ -308,6 +391,15 @@ def main() -> int:
         },
         timezone_name=timezone_name,
     )
+    if not notified(outcomes):
+        # Do not mark the period: an alert that reached nobody must be retried, not
+        # recorded as handled.
+        print(
+            "No notification channel delivered this alert; the period stays "
+            "unmarked so the next check retries.",
+            file=sys.stderr,
+        )
+        return EXIT_ALERT_UNDELIVERED
     mark_alerted(bookkeeping, verdict.period_end, now)
     save_watchdog_state(ROOT, bookkeeping)
     return EXIT_ALERT

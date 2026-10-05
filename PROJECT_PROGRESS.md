@@ -78,6 +78,9 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Collapsed the duplicated subsection rendering into one section table (`SECTION_SPECS`) plus one grouping step (`layout_program`) shared by both formats. Adding a subsection is now one table entry instead of edits in four near-identical render blocks.
 - [x] Encoded the link-scope rules in that table: the two California pathway groups share one workbook link, guidance has its own, and ordinary items carry a link each.
 - [x] Added renderer snapshot tests against a frozen fixture configuration, so the live regulatory inventory no longer churns the expected output. HTML and plain text stayed byte-identical through the refactor.
+- [x] Broadened the run failure handler to every exception, so provider credential errors such as `google.auth.exceptions.RefreshError` are reported through the alert channels instead of escaping as a bare traceback.
+- [x] Made the watchdog alert when it cannot read its own configuration or state, retry an alert that reached no notification channel, and report a failed `--test-alert` as a failure instead of success.
+- [x] Made the watchdog require a record that covers the whole reporting week, and added `alerts.watchdog_armed_from` so a lost state file or a never-successful first automatic send can no longer suppress alerts indefinitely.
 
 ## Current Runtime Configuration
 
@@ -161,7 +164,6 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - Targeted offline regression tests pass after relocation.
 - No generated pytest cache or test work directory remains in the production tree after cleanup.
 - BC LCFS local guidance is included only when `generated_at` falls within the reporting period, appears under `Guidance Updates`, and links once to the official BC source page.
-- The complete offline regression suite passes (55 tests at the last recorded run; run `pytest -q` for the current count).
 - Legacy email item keys remain compatible; local source identity regressions are covered by tests.
 - A pending send is persisted before the provider call and can be resolved through the CLI rather than manual state-file editing.
 - The Task Scheduler action and working directory both point to the production Code path. A delivered send is recorded for the period ending 2026-10-02 (sent 09:12 local time, Gmail message ID `1a0fd2ce718f103a`, 16 items).
@@ -170,7 +172,10 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - Alert channels were exercised for real on the production machine on 2026-10-04: the Desktop marker was written (`C:\Users\48596\Desktop\Weekly Digest ALERT 2026-10-04.txt`) and the message box was displayed and acknowledged by the operator. `msg.exe` is not installed on this machine, so the PowerShell message box fallback is the path that ran. `eventcreate.exe` returned `Access is denied`, so the event-log channel is disabled in configuration.
 - The watchdog was run against live state: it reported `ok` for the period ending 2026-10-02 and wrote no alert bookkeeping, confirming it does not raise a false alarm for a delivered period.
 - Rendered HTML and plain text match the recorded snapshots byte for byte after the section-table refactor, and the link-scope rule is asserted inside the California cluster rather than across the whole document.
-- The offline suite passes 59 tests (run `pytest -q` for the current count).
+- A Gmail credential failure (`RefreshError`) aborts the run with exit code 1 and writes a failure record naming the stage, rather than escaping with no notification.
+- The watchdog notifies when it cannot read its own configuration or state; when no channel delivers an alert it leaves the period unmarked so the next check retries; and a `--test-alert` that reaches nobody returns exit code 4 instead of success.
+- A one-day report does not satisfy the weekly delivery check while a longer catch-up report does, and with `alerts.watchdog_armed_from` set a watchdog with no send history at all still alerts.
+- The offline suite passes 70 tests (run `pytest -q` for the current count).
 
 ## Known Constraints
 

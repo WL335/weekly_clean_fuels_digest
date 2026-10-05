@@ -52,6 +52,10 @@ alerts:
   # Hours after the scheduled Friday 09:00 send time before the watchdog reports
   # the period as missing. Six hours means the alert arrives Friday afternoon.
   grace_hours: 6
+  # Earliest period end (YYYY-MM-DD) the watchdog must treat as "should have been
+  # delivered" even when no send history exists at all, for example after the
+  # state file is lost. Without it a watchdog with no history stays silent.
+  watchdog_armed_from: "2026-10-09"
 
 local_digest_sources:
   - id: "california_lcfs_digest_input"

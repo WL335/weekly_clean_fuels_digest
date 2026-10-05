@@ -1,8 +1,11 @@
+import argparse
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,3 +201,91 @@ def test_clear_failure_record_is_tolerant_of_a_missing_file(tmp_path):
     alerts.clear_failure_record(tmp_path)
 
     assert not path.exists()
+
+
+def test_notified_ignores_the_evidence_record():
+    """The failure record preserves evidence; it is not a notification."""
+    assert alerts.notified([alerts.AlertOutcome("failure_record", True, "path")]) is False
+    assert alerts.notified([alerts.AlertOutcome("popup", False, "no session")]) is False
+    assert (
+        alerts.notified(
+            [
+                alerts.AlertOutcome("failure_record", True, "path"),
+                alerts.AlertOutcome("desktop_marker", True, "path"),
+            ]
+        )
+        is True
+    )
+
+
+def write_digest_config(path: Path) -> None:
+    """Minimal valid configuration with every notification channel disabled."""
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "mailbox": {"sender": "a@example.com", "recipient": "a@example.com"},
+                "schedule": {"timezone": "America/Regina"},
+                "ai": {"model": "gpt-5-nano"},
+                "programs": [
+                    {
+                        "id": "p1",
+                        "name": "Program One",
+                        "country": "United States",
+                        "sender": "s@example.com",
+                        "country_order": 1,
+                        "program_order": 1,
+                    }
+                ],
+                "alerts": {
+                    "popup_enabled": False,
+                    "desktop_marker_enabled": False,
+                    "event_log_enabled": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_provider_credential_error_is_reported(tmp_path, monkeypatch):
+    """RefreshError is none of OSError/ValueError/RuntimeError.
+
+    It used to escape the run handler entirely, which left a Gmail credential
+    failure as a bare traceback with no notification.
+    """
+    from google.auth.exceptions import RefreshError
+
+    from weekly_clean_fuels_digest import main as digest_main
+
+    config_path = tmp_path / "config.yaml"
+    write_digest_config(config_path)
+    monkeypatch.setattr(digest_main, "ROOT", tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        digest_main,
+        "parse_args",
+        lambda: argparse.Namespace(
+            config=config_path,
+            send=True,
+            start=None,
+            end=None,
+            include_processed=False,
+            resolve_pending=None,
+            resolution=None,
+        ),
+    )
+
+    def raise_refresh_error(config):
+        raise RefreshError("invalid_client: unauthorized")
+
+    monkeypatch.setattr(digest_main, "gmail_service", raise_refresh_error)
+
+    code = digest_main.main()
+
+    assert code == 1
+    record = json.loads(
+        (tmp_path / "runtime" / "state" / "last_failure.json").read_text(encoding="utf-8")
+    )
+    assert record["context"]["stage"] == "Gmail connection"
+    assert record["context"]["mode"] == "send"
+    assert "RefreshError" in record["message"]
