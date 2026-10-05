@@ -8,6 +8,8 @@ The system reads regulatory-subscription messages from one mailbox, filters them
 
 This file describes the required behavior. `config/config.yaml` is the authoritative live inventory of mailbox settings, programs, senders, keywords, paths, model selection, and schedule.
 
+Reference reconciliation: October 4, 2026, merged `main` at `dd82c63` (PR #1). Implementation details below describe that merged code; dated deployment evidence and remaining operational checks belong in `PROJECT_PROGRESS.md`. Cite specification sections rather than line numbers when reviewing changes.
+
 The current reference Windows deployment is maintained as a commercial software project at `D:\WorkSpace\Code\Weekly Clean Fuels Digest\weekly_clean_fuels_digest`. Rebuilds on other platforms may use a different installation root, but all internal runtime paths should remain project-relative unless an external data source is intentionally configured with an absolute path.
 
 ## 2. Required Outcomes
@@ -30,9 +32,9 @@ A conforming implementation must:
 14. Persist a pending send transaction before calling the mail API; mark it sent and record item keys only after the provider confirms success. An ambiguous pending send must block future automatic delivery until explicitly resolved.
 15. Run automatically every Friday at 09:00 in `America/Regina`.
 16. Merge configured local regulatory digest files into the same program and reporting period.
-17. Report every failed run through notification channels that do not depend on the mail transport, and distinguish a configuration or credential failure from a runtime failure in the process exit code.
-18. Run an independent delivery watchdog on its own schedule, using no mail transport. It must judge the expected period by that period's recorded send transaction rather than by recent activity, allow a configurable grace period after the scheduled send time, and alert at most once per missed period.
-19. Never exit without attempting to notify: no failure path, including a provider credential error of an unforeseen exception type and a watchdog that cannot read its own configuration or state, may end silently. An alert that reached no notification channel must not be recorded as delivered.
+17. Record handled application failures and, in send mode, attempt notification through channels independent of the mail transport. Distinguish startup/configuration failures (`2`, including a missing API key or unusable state) from runtime failures (`1`, including provider and credential errors). Preview failures record evidence without operator notification.
+18. Run an independent delivery watchdog on its own schedule, using no mail transport. Judge the expected full reporting period by a `sent` transaction or compatible `last_run` record, not merely by recent activity; allow a configurable grace period and normally notify once per missed period after at least one notification channel succeeds.
+19. Handled send-mode failures, including unforeseen provider credential exception types, and failures to read watchdog configuration or state must attempt notification. A watchdog alert that reached no notification channel must remain eligible for retry. A process that never starts or is forcibly killed cannot notify through its own handler; independent checks cover that gap only while their machine and session are available.
 
 ## 3. Current Business Scope
 
@@ -46,7 +48,7 @@ The live configuration contains these programs:
 | United States | New Mexico Clean Transportation Fuel Program (CTFP) | Mixed-topic |
 | Canada | Canada Clean Fuel Regulations (CFR) | Dedicated |
 | Canada | BC Low Carbon Fuel Standard (LCFS) | Dedicated |
-| United Kingdom | UK Sustainable Aviation Fuel (SAF) | Mixed-topic |
+| United Kingdom | UK SAF Mandate | Mixed-topic |
 
 Do not hard-code this inventory. Read it from `config/config.yaml`. Each program entry contains:
 
@@ -71,7 +73,9 @@ For a normal scheduled run:
 - the interval is half-open: `start <= received_at < end`;
 - in plain language, the digest covers Friday through Thursday inclusive.
 
-Example: a run on Friday, September 25 covers September 18 00:00 through September 25 00:00.
+Example: a run on Friday, October 9, 2026 covers October 2 00:00 through October 9 00:00.
+
+The reference window calculation is Friday-based, including manual runs on other weekdays. `schedule.weekday` is descriptive in the current code, not a parameter that changes the window arithmetic. The Windows installer also has fixed Friday/Saturday 09:00 triggers; any schedule change must reconcile the application, installer, and registered tasks rather than editing YAML alone.
 
 The command line must also support explicit ISO dates for reproducible testing:
 
@@ -136,6 +140,9 @@ mailbox: {}
 schedule: {}
 ai: {}
 paths: {}
+integrations: {}
+alerts: {}
+local_digest_sources: []
 programs: []
 ```
 
@@ -153,15 +160,22 @@ Required semantics:
 - `ai.summary_language`: output language.
 - `ai.max_email_characters`: maximum email text supplied to the model.
 - `ai.retry_attempts`: transient model-call retry count.
-- `ai.request_timeout_seconds`: per-attempt model request timeout.
+- `ai.request_timeout_seconds`: per-attempt model request and Gmail HTTP timeout.
 - `ai.run_timeout_seconds`: overall runtime budget, below the scheduler's execution limit.
+- `integrations.local_digest_enabled`: optional local-source interface, default `true`; `false` bypasses local-file discovery and conversion.
 - `alerts.popup_enabled`, `alerts.desktop_marker_enabled`, `alerts.event_log_enabled`: independent failure-notification channels.
 - `alerts.grace_hours`: hours after the scheduled send time before the watchdog reports the period as missing.
 - `alerts.watchdog_armed_from`: earliest period end (`YYYY-MM-DD`) that must alert even when no send history exists, or empty for the lenient behaviour.
 - `paths.*`: project-relative credential, token, state, log, and preview paths.
+- `paths.log_max_bytes` and `paths.log_backup_count`: log rotation size and backup count.
+- `local_digest_sources`: list of local source definitions; see Section 7.0 for conversion semantics.
 - `programs`: ordered regulatory-program definitions.
 
-Fail fast when the file is missing, malformed, lacks programs, or maps one sender to more than one program.
+The reference YAML explicitly enables popup and Desktop marker and disables the Windows event-log channel. Code defaults enable all three if their switches are absent, including fallback notification when configuration cannot be loaded. Production uses `alerts.grace_hours: 6` and `alerts.watchdog_armed_from: "2026-10-09"`. These are deployment values, not universal rebuild constants; select the arming date deliberately.
+
+Each `local_digest_sources` entry supports `id`, `program_id`, `directory`, `pattern` (default `*.json`), `timestamp_field` (default `generated_at`), `json_program`, `display_label`, and `public_source_url`. `program_id` and `directory` are required; the program ID must exist in `programs`. `display_label` describes the feed and does not rename renderer sections. The California source explicitly sets the public URL to `https://ww2.arb.ca.gov/sites/default/files/classic/fuels/lcfs/fuelpathways/current-pathways_all.xlsx`; the BC source obtains its public link from `source.source_page` in the input JSON. Current directory values are recorded in `PROJECT_PROGRESS.md` and must be adapted when moving platforms.
+
+Fail fast for missing/malformed core sections, empty or duplicate program IDs, invalid mailbox/model/timezone fields, invalid numeric budgets or log settings, invalid alert switches/grace/arming date, malformed local sources, and sender mappings shared by multiple programs. Keep the actual validation contract aligned with the implementation; do not assume every descriptive YAML field is dynamically enforced.
 
 ## 7. Message Discovery and Parsing
 
@@ -198,7 +212,7 @@ Build a provider-side query containing:
 - a lower date bound;
 - an upper date bound.
 
-Because provider date searches may be coarse, fetch each candidate's timestamp and enforce the exact timezone-aware half-open reporting interval locally.
+The Gmail adapter supplies Unix timestamp bounds. Regardless of provider-side precision, fetch each candidate's timestamp and enforce the exact timezone-aware half-open reporting interval locally; do not rely on an unverified date-search precision assumption.
 
 ### 7.2 MIME parsing
 
@@ -271,6 +285,8 @@ The model response is equivalent to:
 
 Validate the response before using it. If `source_link_id` is missing or is not present in the extracted allowlist, use the original mailbox message URL. Never accept a model-invented URL.
 
+`confidence` is validated metadata, not a manual-review queue or an implemented automatic threshold. The current converter accepts non-empty items regardless of that label; relevance/ambiguity exclusion is instructed in the model prompt. Do not document a confidence-based discard policy unless it is actually implemented and tested.
+
 ## 10. Conversion, Ordering, and Deduplication
 
 Normalize titles by collapsing whitespace and trimming decorative punctuation.
@@ -306,7 +322,7 @@ Unless `--include-processed` is present, remove keys already recorded under `sen
 
 ## 11. Output Artifacts
 
-Every run, including preview mode, writes:
+Every run that completes analysis and rendering, including preview mode, writes:
 
 ```text
 runtime/output/weekly_digest_preview.html
@@ -335,6 +351,8 @@ The JSON file must contain all final items used in the digest and preserve Unico
 
 Required command-line behavior:
 
+For the reference `src/` layout, run from the project root with dependencies installed in the local virtual environment and `PYTHONPATH` set to the absolute `src` directory. Setup does not install the application as a package. Windows batch runners set this automatically; direct Command Prompt calls require `set "PYTHONPATH=%CD%\src"`, and PowerShell calls require `$env:PYTHONPATH = Join-Path (Get-Location).Path "src"`. Use the virtual environment's Python executable for the commands below.
+
 ```text
 python -m weekly_clean_fuels_digest.main
 python -m weekly_clean_fuels_digest.main --send
@@ -348,7 +366,7 @@ python -m weekly_clean_fuels_digest.main --config path/to/config.yaml
 
 - Default mode creates previews only.
 - `--send` sends the digest after every candidate message succeeds.
-- `--include-processed` bypasses cross-run filtering for deliberate tests.
+- `--include-processed` bypasses sent-item filtering and the normal same-period transaction check for deliberate tests. It uses a separate deterministic digest ID; the same override ID cannot be sent twice after being recorded as `sent`.
 - `--resolve-pending DIGEST_ID --resolution sent|not-sent` resolves an uncertain send without sending email. `sent` records included items as sent; `not-sent` allows a deliberate retry.
 - Preview mode never modifies sent-item state.
 - A previously sent reporting period is blocked from automatic redelivery. `--include-processed` is an explicit testing override.
@@ -357,7 +375,7 @@ python -m weekly_clean_fuels_digest.main --config path/to/config.yaml
 
 The default state path is `runtime/state/state.json`.
 
-Minimum state structure:
+Illustrative state structure (timestamps must include an offset; transaction status is one of `sending`, `sent`, or `resolved_not_sent`):
 
 ```json
 {
@@ -368,33 +386,42 @@ Minimum state structure:
   },
   "sent_items": {
     "stable_item_key": {
-      "sent_at": "timezone-aware ISO timestamp",
+      "sent_at": "2026-10-02T09:12:53-06:00",
       "title": "item title",
       "program_id": "program ID",
-      "source_url": "verified URL"
+      "source_url": "verified URL",
+      "source_kind": "email",
+      "source_item_id": null
     }
   },
   "send_transactions": {
     "wcf-digest-id": {
-      "status": "sending | sent | resolved_not_sent",
-      "period_start": "ISO timestamp",
-      "period_end": "ISO timestamp",
+      "status": "sending",
+      "period_start": "2026-09-25T00:00:00-06:00",
+      "period_end": "2026-10-02T00:00:00-06:00",
+      "subject": "formatted digest subject",
+      "started_at": "2026-10-02T09:12:00-06:00",
       "items": []
     }
   },
   "last_run": {
-    "sent_at": "timezone-aware ISO timestamp",
+    "sent_at": "2026-10-02T09:12:53-06:00",
     "gmail_message_id": "provider message ID",
-    "period_start": "ISO timestamp",
-    "period_end": "ISO timestamp",
+    "digest_id": "wcf-digest-id",
+    "period_start": "2026-09-25T00:00:00-06:00",
+    "period_end": "2026-10-02T00:00:00-06:00",
     "item_count": 0
   }
 }
 ```
 
-Write state atomically using a temporary file followed by replacement. Before sending, persist a deterministic digest ID, period, subject, and included item records with `status: sending`. Add that ID as an RFC 5322 `Message-ID` and in the text/HTML footer. After provider success, update the transaction to `sent` and record sent-item keys and the provider message ID. If the process stops while status is `sending`, refuse all automatic sends and require the operator to check delivery and use `--resolve-pending`. `sent` confirms delivery and records item suppression; `not-sent` records an explicit decision to allow retry. This is a fail-closed ambiguity safeguard, not exactly-once delivery.
+The reference digest ID is `wcf-` plus the first 24 hexadecimal characters of SHA-256 over compact, sorted-key JSON containing timezone-aware `period_start`, `period_end`, mailbox `sender` and `recipient`, model ID, and the ordered list of program IDs. Add `include_processed: true` only for the explicit override. It is not a hash of the entire YAML file or rendered body. The Message-ID is `<DIGEST_ID@weekly-clean-fuels-digest.local>`; the same digest ID is supplied directly to both renderers for their footer.
 
-`schema_version` describes the state file shape. `identity_version` describes the active identity rules by source. Legacy state without these fields remains readable; do not mechanically rewrite or dual-check legacy local keys.
+Write state atomically using a temporary file followed by replacement. Before sending, persist the digest ID, period, subject, `started_at`, and included item records with `status: sending`. Each included item record contains `item_key`, `title`, `program_id`, `source_url`, `source_kind`, and `source_item_id`. After provider success, set transaction `status` to `sent`, add `sent_at` and `gmail_message_id`, record the sent-item keys, and update `last_run`. This records provider acceptance, not a guarantee of final recipient delivery.
+
+If any transaction remains `sending`, refuse automatic sends and require the operator to check delivery and use `--resolve-pending`. Resolution adds `resolved_at` and `resolution`. Choosing `sent` marks the transaction sent and records item suppression based on the operator's confirmation; choosing `not-sent` sets `resolved_not_sent` and permits a deliberate retry. Resolution does not send email or require an OpenAI key. This is a local send-intent/transaction safeguard, not an append-only WAL or exactly-once delivery.
+
+State validation requires objects for `sent_items` and `send_transactions`, recognized transaction statuses, valid item-record shapes, and timezone-aware ISO strings for transaction period bounds and any period bounds present in `last_run`. Bare local timestamps are rejected. `schema_version` describes the state file shape. `identity_version` records source identity versions but does not itself select the key algorithm. Legacy state without these fields is defaulted in memory and remains readable; leave existing item keys unchanged rather than mechanically rewriting or dual-checking legacy local keys. Preview mode does not save those defaults.
 
 ## 14. Logging and Failure Policy
 
@@ -405,6 +432,26 @@ Rotate the log at a configurable size (`paths.log_max_bytes`, default 5 MB) and 
 Never log secrets, OAuth tokens, raw authorization headers, or complete credential objects.
 
 Retry model calls with exponential backoff for the configured number of attempts. If all attempts fail, raise the error and abort. Do not continue to send a partial digest.
+
+### 14.1 Independent failure notification
+
+Handled application failures attempt an atomic write of `runtime/state/last_failure.json` containing `detected_at`, title, message, timezone, and context (including stage, mode, and exit code). Send-mode failures also attempt every enabled operator channel: a Windows popup (`msg.exe`, or a PowerShell message box fallback), a date-stamped Desktop marker, and the Windows Application event log. Record each outcome separately. The event-log adapter uses source `WeeklyCleanFuelsDigest` and event ID `991`; production disables it because the non-elevated deployment could not write it.
+
+A popup subprocess timeout after 60 seconds is always unconfirmed. Do not create or trust a shared display-proof marker. A successful failure-record write alone does not count as operator notification; at least one enabled popup/Desktop/event-log channel must report success. A Desktop file write proves persistence, not that a human read it. Preview failures do not request operator channels. A successful main run attempts to clear the latest failure record; Desktop marker files persist until removed.
+
+Main application exit codes are `0` success, `1` runtime failure (including provider/credential exceptions), and `2` startup/configuration/state failure (including a missing key). The Windows runners propagate Python's exit code, but return `1` without application alerts when the Python executable is missing.
+
+### 14.2 Delivery watchdog
+
+Run `weekly_clean_fuels_digest.watchdog` independently of Gmail and OpenAI calls. Load the same configuration and digest state; never mutate digest state. Calculate the most recent Friday midnight and its preceding seven-day window. A `sent` transaction, or compatible `last_run`, accounts for that period only when both bounds are timezone-aware, its end equals the expected end, and its start is no later than the expected start. A shorter manual report does not count; a longer catch-up report with that end does. This is recorded-send evidence, not a mailbox check.
+
+If no covering send exists, wait until Friday's configured `schedule.time` plus `alerts.grace_hours`. After that, a `sending` transaction for the expected end yields `pending`; otherwise missing delivery yields `missing`. Entirely empty history yields `uninitialized` unless `alerts.watchdog_armed_from` is set and the expected period end is on or after that date. Arming does not suppress checks of periods for which history already exists. The grace boundary is an eligibility threshold, not a notification trigger: the installed Saturday 09:00 job checks after the default Friday 15:00 threshold.
+
+Store separate bookkeeping at `runtime/state/watchdog.json`: `alerted_periods` maps the Friday date (`YYYY-MM-DD`) to the timezone-aware notification timestamp; `last_check_at` is updated when a period is marked alerted. Mark a period only after at least one notification channel reports success. Leave it unmarked when all fail, so a later check retries. Missing bookkeeping starts empty; unreadable or malformed bookkeeping is treated as empty with a warning. An unreadable digest state or configuration triggers notification rather than a silent delivery verdict.
+
+Watchdog CLI options are `--config PATH`, `--now ISO_TIMESTAMP`, `--grace-hours HOURS`, `--force-alert`, and `--test-alert`. Test alerts change no digest/watchdog state or failure record, but can write logs and a Desktop marker. Other overrides can issue real alerts and update bookkeeping. Exit codes: `0` no alert needed or a test channel succeeded; `2` configuration/state/unexpected check error (notification still attempted); `3` missing/pending period, including an already-reported period; `4` required/test notification reached no channel. A failed configuration/check still returns `2` even if its notification also fails.
+
+On another platform, replace Windows-specific popup/event-log adapters with usable independent notification channels and prove their outcomes before relying on the watchdog. A same-machine watchdog cannot report whole-period downtime if it never gets a chance to run.
 
 ## 15. Reference Python Implementation
 
@@ -436,6 +483,8 @@ preview writer
 send transaction
 state repository
 scheduler entry point
+independent failure notification
+delivery watchdog and alert bookkeeping
 ```
 
 The reference implementation uses these explicit production boundaries:
@@ -455,6 +504,10 @@ src/weekly_clean_fuels_digest/shared_digest_models.py
                               source-independent shared data contracts
 src/weekly_clean_fuels_digest/integrations/local_digest.py
                               optional external digest_input adapter
+src/weekly_clean_fuels_digest/alerts.py
+                              independent notification adapters and failure records
+src/weekly_clean_fuels_digest/watchdog.py
+                              period-specific delivery check and separate bookkeeping
 tests/test_core.py            email-core and shared-pipeline tests
 tests/test_local_digest_integration.py
                               local-interface tests
@@ -471,27 +524,31 @@ tests/test_rendering.py       renderer snapshots and link-scope tests
 
 ### Windows
 
-Register a Task Scheduler job that runs `scripts/run_weekly.bat` every Friday at 09:00 local time, uses the project directory as the working directory, ignores overlapping instances, has a one-hour execution limit, and starts when available after a missed trigger.
+Run `scripts/install_scheduled_task.ps1` to register or replace both tasks. `Weekly Clean Fuels Regulatory Digest` runs `scripts/run_weekly.bat` every Friday at 09:00 Windows-local time, uses the project directory as the working directory, ignores overlapping instances, has a one-hour execution limit, and starts when available after a missed trigger.
 
-Register a second, independent Task Scheduler job that runs `scripts/run_watchdog.bat` every Saturday at 09:00 local time with its own execution limit. Keep it a separate task so that a failure in the digest task cannot prevent the delivery check, and so that it can run without `OPENAI_API_KEY`.
+`Weekly Clean Fuels Digest Watchdog` independently runs `scripts/run_watchdog.bat` every Saturday at 09:00 Windows-local time, with a 15-minute execution limit, the same working directory, `IgnoreNew`, and `StartWhenAvailable`. Keep it a separate task so that a failure in the digest task cannot prevent the delivery check, and so that it can run without `OPENAI_API_KEY`. Both runners set `PYTHONPATH` to `<project>/src`. Match the machine timezone to the intended reporting timezone and re-register after any path or trigger change; the current installer does not derive its triggers from YAML.
 
 The current job runs interactively, so the Windows user must be logged in. A non-interactive deployment requires a service account or stored Windows task credentials and access to the user-level API key and OAuth token.
 
 ### Linux
 
-Use a systemd timer or cron. Prefer systemd because it supports persistent catch-up behavior. Set the timezone explicitly and run a wrapper that changes to the project directory, activates the virtual environment, loads `OPENAI_API_KEY` from a protected environment file, and executes:
+Use a systemd timer or cron with the required timezone and catch-up behavior explicitly configured. Run a wrapper that changes to the project directory, uses that platform's virtual environment, exposes `<project>/src` through `PYTHONPATH`, and loads `OPENAI_API_KEY` securely for the digest job. An illustrative digest entry point is:
 
-```text
-python -m weekly_clean_fuels_digest.main --send
+```sh
+cd /path/to/weekly_clean_fuels_digest
+export PYTHONPATH="$PWD/src"
+exec .venv/bin/python -m weekly_clean_fuels_digest.main --send
 ```
+
+Use a separate wrapper/job for `.venv/bin/python -m weekly_clean_fuels_digest.watchdog`, with the same project root and `PYTHONPATH`, but no API-key requirement. The illustration is an invocation contract, not a supplied Linux installer; implement and verify platform-specific notification adapters as described in Section 14.2.
 
 ### macOS
 
-Use a `launchd` LaunchAgent or LaunchDaemon. Set the working directory and environment explicitly. Run every Friday at 09:00 local time and ensure missed-run behavior is understood and tested.
+Use a `launchd` LaunchAgent or LaunchDaemon. Set the project-root working directory, absolute virtual-environment Python, `PYTHONPATH=<project>/src`, timezone, and protected environment explicitly. Schedule the digest and watchdog separately; run the digest Friday at 09:00 and verify missed-run behavior and the replacement notification channels.
 
 ### Containers or Cloud Schedulers
 
-Mount or securely provide the Gmail OAuth refresh token, configuration, and durable state. Use a secret manager for `OPENAI_API_KEY`. Ensure only one scheduled instance runs at a time and that `runtime/state/state.json` is stored on durable, atomic storage.
+Mount or securely provide the Gmail OAuth refresh token, configuration, and durable state. Use a secret manager for `OPENAI_API_KEY`. Set the project-root working directory and `PYTHONPATH=<project>/src`, or deliberately package/install the application in a replacement build. Adapt absolute external digest-source paths. Ensure only one scheduled instance runs at a time and that digest state and watchdog bookkeeping are on durable storage supporting the required atomic replacement. Windows popup/event-log commands are not portable: supply tested platform-appropriate independent notification channels.
 
 On every platform, schedule the delivery watchdog as a separate job shortly after the expected send time plus its grace period, and never let it depend on the mail transport.
 
@@ -511,7 +568,7 @@ PROJECT_PROGRESS.md
 setup and scheduler scripts
 ```
 
-`tests/` is executable quality-assurance code. `requirements.txt` contains production dependencies; `requirements-dev.txt` contains test and development-only dependencies. Tests must run after material code, rendering, dependency, or configuration-contract changes and before production release. A continuous-integration workflow must run that suite on every push with no Gmail access, no mail delivery, and no production API key, and must fail if credentials have been committed.
+`tests/` is executable quality-assurance code. `requirements.txt` contains production dependencies; `requirements-dev.txt` contains test and development-only dependencies. Tests must run after material code, rendering, dependency, or configuration-contract changes and before production release. The current `.github/workflows/ci.yml` runs the offline suite on pushes to `main` or `DS-fix` and on pull-request events, using Windows with Python 3.11 and 3.13, no Gmail access, no mail delivery, and an explicitly blank production API key. Other branch pushes alone do not trigger it. Its credential guard rejects tracked files under `runtime/secrets/`; it is not a general secret scanner. Preserve or deliberately revise this trigger/guard contract when rebuilding CI.
 
 The following must be excluded from version control and deployment bundles intended for sharing:
 
@@ -575,10 +632,10 @@ A rebuilt implementation is equivalent only after all of these pass:
 32. The state CLI can resolve a pending transaction as sent or not-sent without sending mail.
 33. Every enabled notification channel is attempted on failure, each channel records whether it succeeded, and the exit code distinguishes startup and configuration failures (2), including a missing API key, from failures raised during the run (1), including provider and credential errors.
 34. The watchdog reports a period as missing only after the configured grace period, does not accept an earlier period's send as evidence, reports an unresolved pending transaction as its own case, and notifies at most once per missed period.
-35. `--test-alert` delivers a notification through the enabled channels without sending mail and without changing state.
+35. `--test-alert` attempts every enabled notification channel without sending mail or changing digest/watchdog state or the failure record; logs/Desktop output are allowed, and success requires at least one notification-channel success.
 36. Both renderers accept the digest ID as an argument. A rendered body contains the digest ID only when it is supplied, and no caller rewrites rendered markup to insert it.
 37. A local item whose source URL is not public renders without a link in both HTML and plain text.
-38. Continuous integration runs the offline suite on every push with no Gmail access, no delivery, and no production key, and fails when credentials are tracked.
+38. Continuous integration runs the offline suite on pushes to `main`/`DS-fix` and pull-request events with no Gmail access, no delivery, and no production key, and fails when files under `runtime/secrets/` are tracked.
 39. Both formats derive subsection order, multiline handling, and link scope from a single section definition. Adding a subsection requires one entry there, the California pathway groups continue to share exactly one link, and rendering is covered by snapshots taken against a frozen fixture configuration rather than the live inventory.
 40. A failure of any exception type aborts the run, returns the runtime exit code, and attempts notification; a Google auth `RefreshError` in particular is covered.
 41. A watchdog that cannot read its configuration or state notifies instead of exiting quietly. An alert that reached no notification channel is not recorded, so the next check retries, and `--test-alert` returns a failure code when nothing was delivered.
@@ -593,13 +650,13 @@ A rebuilt implementation is equivalent only after all of these pass:
 3. Create or refresh the isolated virtual environment at its final project location, then install runtime dependencies. Do not copy a virtual environment from another path or platform.
 4. Create a Gmail desktop OAuth client, enable Gmail API, and place the credential JSON in the configured secrets path.
 5. Create an OpenAI API key with funded API access and expose it as `OPENAI_API_KEY` to the runtime user.
-6. Run preview mode and complete the one-time Gmail OAuth consent flow.
+6. Establish the project-root working directory and `PYTHONPATH=<project>/src` (or an explicitly installed replacement package), then run preview mode and complete the one-time Gmail OAuth consent flow.
 7. Inspect HTML, text, JSON, and logs.
 8. Run the acceptance tests.
 9. Send one deliberate test using `--send --include-processed` if necessary.
 10. Verify receipt at the exact configured mailbox address.
-11. Install the platform scheduler.
-12. Verify scheduler identity, working directory, environment, next trigger, missed-run behavior, and log output.
+11. Select and test independent alert channels, choose the watchdog arming date, then install both platform scheduler jobs: digest and watchdog. On Windows, run `scripts/install_scheduled_task.ps1` from the final project path.
+12. Verify both scheduler identities, actions, working directories, environments, next triggers, missed-run behavior, and execution limits. Observe an actual scheduled digest invocation and independent watchdog invocation; correlate results with logs, period-specific state, and receipt. Do not treat registration or a later manual send as proof of scheduled success.
 
 ## 20. Definition of Done
 

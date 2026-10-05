@@ -2,11 +2,13 @@
 
 ## Status Summary
 
-**Overall status:** Operational
+**Overall status:** Implemented and merged; successful sending recorded; next scheduled end-to-end verification outstanding
 
-**Status date:** September 29, 2026 (`America/Regina`)
+**Status date:** October 4, 2026 (`America/Regina`)
 
-The end-to-end workflow has been implemented and exercised successfully: Gmail OAuth, regulatory-message discovery, GPT-5 nano analysis, structured-output validation, digest generation, email delivery, persistent deduplication, and Windows Task Scheduler registration.
+The end-to-end workflow has been implemented and exercised: Gmail OAuth, regulatory-message discovery, GPT-5 nano analysis, structured-output validation, digest generation, email sending, persistent deduplication, and Windows Task Scheduler registration. Both digest and watchdog tasks point to the production Code path. A successful send is recorded, but the latest digest task result is non-zero and the watchdog has no confirmed scheduled run; registration and manual verification must not be presented as proof of unattended success.
+
+**Merged reference:** `main` at `dd82c63` (`Merge pull request #1 from WL335/DS-fix`), containing the reviewed changes through `c47dab8`. Local `main` matches the locally recorded `origin/main`; no live GitHub CI result was queried during this documentation update.
 
 ## Completed
 
@@ -54,7 +56,7 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Moved configuration to `config/config.yaml`, operating scripts to `scripts/`, and all mutable operating data to `runtime/`.
 - [x] Added `cleanfuel.standard@env.nm.gov` as a second New Mexico CTFP Gmail source while retaining the existing NMED source.
 - [x] Added the default-on `integrations.local_digest_enabled` toggle; setting it to `false` selects the Gmail-only workflow.
-- [x] Split core tests from local-interface tests; the full offline suite now passes 8 tests.
+- [x] Split core tests from local-interface tests and expanded the full offline suite to 75 passing tests as of this status date.
 - [x] Preserved the legacy email item-key recipe while moving local digest records to source-specific identity version 2.
 - [x] Identified California pathways by upstream pathway ID when available, otherwise by stable company/fuel/class/description fields; CI and ordinary row position do not change pathway identity.
 - [x] Retained `source_row` only as a tie-breaker for otherwise identical records within one input file, favoring visible duplicates over silent merging.
@@ -66,8 +68,8 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Added startup structure validation, parameterized default seven-day reporting-window tests, bounded Gmail/OpenAI request timeouts, and an overall 55-minute work budget.
 - [x] Added configurable log rotation (5 MB, five backups by default); preview artifacts continue to overwrite fixed filenames.
 - [x] Expanded the offline suite with identity regressions, provider-schema compatibility, state compatibility, pending-send resolution, Message-ID markers, and update rendering coverage.
-- [x] Added failure notification through channels independent of the mail transport: a `runtime/state/last_failure.json` record, a Windows `msg.exe` popup, a date-stamped Desktop marker file, and a best-effort Windows Application event log entry. Every channel records whether it succeeded.
-- [x] Split process exit codes so a configuration or credential failure (`2`) is distinguishable from a runtime failure (`1`) in Task Scheduler history.
+- [x] Added independent failure notification: a `runtime/state/last_failure.json` record, a popup through `msg.exe` or a PowerShell fallback, a date-stamped Desktop marker, and an optional Windows Application event-log channel. Production enables popup and Desktop marker; event log is disabled after its permission failure. Every attempted channel records its outcome.
+- [x] Split application exit codes into startup/configuration failure (`2`, including a missing key or unusable state) and runtime failure (`1`, including provider and credential errors). Batch runners return `1` without application alerts if the Python executable is missing.
 - [x] Moved the `OPENAI_API_KEY` presence check into the application so a missing key is reported through the alert channels instead of only as a batch-file exit code.
 - [x] Added an independent delivery watchdog (`weekly_clean_fuels_digest.watchdog`, `scripts\run_watchdog.bat`) with its own Saturday Task Scheduler entry. It uses no mail transport, needs no OpenAI key, judges a period by that period's own send transaction, allows a configurable grace period after the scheduled send time, reports an unresolved pending transaction separately, and notifies at most once per missed period.
 - [x] Added the `alerts.*` configuration section with startup validation for the notification switches and the grace period.
@@ -83,8 +85,8 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 - [x] Made the watchdog require a record that covers the whole reporting week, and added `alerts.watchdog_armed_from` so a lost state file or a never-successful first automatic send can no longer suppress alerts indefinitely.
 - [x] Required period timestamps in state to be timezone-aware at validation, and made the watchdog treat an unprovable record as unaccounted for rather than letting a naive-versus-aware comparison escape the check.
 - [x] Added a last-resort guard around the whole watchdog flow, so any unexpected failure still notifies through the alert channels.
-- [x] Required display proof before a timed-out message box counts as a delivered notification.
-- [x] Removed that shared display-proof file again: a timeout is now always unconfirmed, so a stale or concurrently written marker can no longer make an undelivered alert look delivered, and the retry stays in place unless another channel delivers.
+- [x] Finalized popup semantics in `c47dab8`: every timeout is unconfirmed; the earlier shared display-proof approach was removed so stale or concurrent markers cannot make an undelivered alert count. Retry remains eligible unless another notification channel succeeds.
+- [x] Merged PR #1 into `main` at `dd82c63` and reconciled all three English project documents with that code, live configuration, and dated operational evidence.
 
 ## Current Runtime Configuration
 
@@ -108,47 +110,69 @@ The end-to-end workflow has been implemented and exercised successfully: Gmail O
 | OpenAI request timeout | 90 seconds per attempt |
 | Overall run budget | 55 minutes |
 | Log rotation | 5 MB per file; five backups |
-| Failure alerts | `msg.exe` popup, Desktop marker file, Windows event log (all enabled) |
+| Failure alerts | Popup and Desktop marker enabled; Windows event log disabled |
+| Popup on this machine | PowerShell message box fallback; `msg.exe` is absent |
 | Watchdog schedule | Every Saturday at 09:00 local time |
 | Watchdog grace period | 6 hours after the scheduled Friday 09:00 send (`alerts.grace_hours`) |
-| Process exit codes | `0` success; `1` failure during the run, including credential errors; `2` startup or configuration failure, including a missing API key; `3` watchdog alert; `4` watchdog alert undelivered |
+| Watchdog arming | `alerts.watchdog_armed_from: "2026-10-09"` (first period end that must alert even with no send history) |
+| Digest application exit codes | `0` success; `1` runtime failure, including provider/credential errors; `2` startup/configuration/state failure, including a missing key |
+| Watchdog exit codes | `0` no alert required or test channel success; `2` configuration/state/check failure; `3` missing/pending period, including one already reported; `4` required/test notification undelivered |
+| Batch wrapper failure | Missing virtual-environment Python returns `1` before application alerting can run |
+| CI triggers | Pushes to `main`/`DS-fix` and pull-request events; Windows, Python 3.11 and 3.13 |
 | California LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\CA_LCFS\digest_input` |
 | BC LCFS local source | `D:\WorkSpace\Code\RegProgram_Automation\program\BC_LCFS\digest_input` |
 | Source-link label | `View original source →` |
 
 ## Latest Recorded State
 
-The following values were read from the live local state on September 26, 2026:
+The following values were read from live local state and output on October 4, 2026. All timestamps below use `America/Regina` (UTC−06:00):
 
 | Field | Value |
 |---|---|
-| Latest successful send timestamp | `2026-09-25 09:35:13` local time |
-| Latest Gmail message ID | `1a0d934d20190003` |
-| Latest recorded period start | `2026-09-18 00:00:00` |
-| Latest recorded period end | `2026-09-25 00:00:00` |
-| Items in latest send | `1` |
-| Total item keys in deduplication state | `32` |
-| Items in current preview JSON | `1` (latest completed reporting period) |
+| Latest provider-accepted send recorded at | `2026-10-02T09:12:53.981468-06:00` |
+| Latest Gmail message ID | `1a0fd2ce718f103a` |
+| Latest digest ID | `wcf-ec648e5ccf15d37f47795216` |
+| Latest recorded period start | `2026-09-25T00:00:00-06:00` |
+| Latest recorded period end | `2026-10-02T00:00:00-06:00` |
+| Items in latest send | `16` |
+| Total item keys in deduplication state | `49` |
+| Send transactions | `1` |
+| State schema / identity versions | Schema `1`; email `1`; local digest `2` |
+| Items in current preview JSON | `16` |
 
-These are mutable operational values, not design constants. Future successful sends will update them.
+These are mutable operational snapshots, not design constants or continuously refreshed documentation. State records provider acceptance; it does not independently prove recipient delivery or identify which Task Scheduler invocation produced the send. Future runs can overwrite previews and update state.
 
 ## Scheduler Status
 
-The Windows scheduled task was installed successfully with these settings:
+Both Windows tasks were read-only checked on October 4, 2026. Their executable is `C:\Windows\System32\cmd.exe`; actions and working directories point to the production Code deployment:
 
 ```text
 Task name: Weekly Clean Fuels Regulatory Digest
-Executable: C:\Windows\System32\cmd.exe
 Command: /c "<project>\scripts\run_weekly.bat"
 Working directory: D:\WorkSpace\Code\Weekly Clean Fuels Digest\weekly_clean_fuels_digest
 Trigger: Friday at 09:00 local time
+Execution limit: 1 hour
+
+Task name: Weekly Clean Fuels Digest Watchdog
+Command: /c "<project>\scripts\run_watchdog.bat"
+Working directory: D:\WorkSpace\Code\Weekly Clean Fuels Digest\weekly_clean_fuels_digest
+Trigger: Saturday at 09:00 local time
+Execution limit: 15 minutes
+
+Both tasks:
 Start when available: enabled
 Multiple instances: ignore new instance
-Execution limit: 1 hour
 Logon type: Interactive
 ```
 
-The live registered task action and working directory were read-only checked on September 29, 2026; both point to the `D:\WorkSpace\Code\Weekly Clean Fuels Digest\weekly_clean_fuels_digest` deployment. Task Scheduler reports its latest run was September 27 at 5:33 PM with result code 0, and the next run is Friday, October 2 at 9:00 AM. The Sunday run is not evidence of a Friday scheduled delivery; confirm the next scheduled run and receipt separately.
+| Task | Current state | Last run/result observed | Next run (`America/Regina`) |
+|---|---|---|---|
+| Digest | Ready | `2026-10-02 09:00:01`; result `1` | Friday, `2026-10-09 09:00:00` |
+| Watchdog | Ready | No confirmed scheduled run; raw result `267011` and placeholder last-run date | Saturday, `2026-10-10 09:00:00` |
+
+The digest's non-zero task result is not evidence of a clean scheduled completion, even though state records a subsequent successful send at 09:12. Correlating that send with the earlier invocation would require its log/history; this documentation update did not diagnose or repair the task. The previously recorded manual watchdog check is not proof that its registered Saturday task ran. Confirm both upcoming scheduled invocations and receipt separately.
+
+The six-hour grace period makes a missing Friday send eligible at 15:00 Friday; the installed watchdog checks Saturday at 09:00. It does not automatically notify Friday afternoon. The installer fixes Friday/Saturday 09:00 Windows-local triggers and does not read them from YAML; keep the machine timezone aligned and re-register both tasks after deployment-path or trigger changes.
 
 Operational consequence: the computer must be powered on and the Windows user must be logged in. If the scheduled time is missed while the task cannot run, Task Scheduler is configured to start it when available.
 
@@ -166,22 +190,22 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - No `review_required.json` file is generated.
 - The relocated application starts from the new production directory.
 - Targeted offline regression tests pass after relocation.
-- No generated pytest cache or test work directory remains in the production tree after cleanup.
+- Generated caches and test work directories are excluded from Git; their presence is mutable and must not be confused with permanent tests.
 - BC LCFS local guidance is included only when `generated_at` falls within the reporting period, appears under `Guidance Updates`, and links once to the official BC source page.
 - Legacy email item keys remain compatible; local source identity regressions are covered by tests.
 - A pending send is persisted before the provider call and can be resolved through the CLI rather than manual state-file editing.
-- The Task Scheduler action and working directory both point to the production Code path. A delivered send is recorded for the period ending 2026-10-02 (sent 09:12 local time, Gmail message ID `1a0fd2ce718f103a`, 16 items).
+- Both Task Scheduler actions and working directories point to the production Code path. State records a provider-accepted send for the period ending 2026-10-02 (09:12 local time, Gmail message ID `1a0fd2ce718f103a`, 16 items); scheduled-run success remains a separate check.
 - Disabling `integrations.local_digest_enabled` bypasses the optional local interface while preserving the Gmail core and shared output pipeline.
-- A failed send-mode run writes `runtime/state/last_failure.json`, shows a message box, and writes a Desktop marker file; every channel reports its own outcome in the log.
+- A handled send-mode failure attempts `runtime/state/last_failure.json` and every enabled notification channel; outcomes are recorded rather than assuming every channel succeeds. Preview failures record evidence without operator notification.
 - Alert channels were exercised for real on the production machine on 2026-10-04: the Desktop marker was written (`C:\Users\48596\Desktop\Weekly Digest ALERT 2026-10-04.txt`) and the message box was displayed and acknowledged by the operator. `msg.exe` is not installed on this machine, so the PowerShell message box fallback is the path that ran. `eventcreate.exe` returned `Access is denied`, so the event-log channel is disabled in configuration.
-- The watchdog was run against live state: it reported `ok` for the period ending 2026-10-02 and wrote no alert bookkeeping, confirming it does not raise a false alarm for a delivered period.
+- During the earlier implementation verification, a manual watchdog check against live state reported `ok` for the period ending 2026-10-02 and wrote no alert bookkeeping. This was not repeated during the documentation-only update and is distinct from a scheduled invocation.
 - Rendered HTML and plain text match the recorded snapshots byte for byte after the section-table refactor, and the link-scope rule is asserted inside the California cluster rather than across the whole document.
 - A Gmail credential failure (`RefreshError`) aborts the run with exit code 1 and writes a failure record naming the stage, rather than escaping with no notification.
 - The watchdog notifies when it cannot read its own configuration or state; when no channel delivers an alert it leaves the period unmarked so the next check retries; and a `--test-alert` that reaches nobody returns exit code 4 instead of success.
 - A one-day report does not satisfy the weekly delivery check while a longer catch-up report does, and with `alerts.watchdog_armed_from` set a watchdog with no send history at all still alerts.
 - A timezone-naive timestamp in state is rejected at load with an actionable error, and a naive send record cannot prove delivery without silencing the watchdog.
 - A message box that is not acknowledged within its timeout is reported as unconfirmed, and an earlier successful popup cannot make a later timeout count.
-- The offline suite passes 75 tests (run `pytest -q` for the current count).
+- On October 4, the merged code's offline suite passed 75 tests in an isolated temporary copy of `src`, `config`, and `tests`, using the production virtual-environment Python with an empty API key, bytecode/cache writing disabled, and temporary test data outside production. An initial sandboxed attempt failed on temporary-directory permissions, not assertions; the permitted isolated rerun passed (`75 passed in 1.42s`). Both CLI `--help` entry points also succeeded. No live mail, credentials, state, scheduler settings, or real alerts were exercised or changed by this check.
 
 ## Known Constraints
 
@@ -191,13 +215,14 @@ Operational consequence: the computer must be powered on and the Windows user mu
 4. OpenAI API calls require positive API credit and access to `gpt-5-nano`.
 5. Provider pricing, model availability, and API schemas can change; dependency upgrades must be tested before deployment.
 6. Regulatory sender addresses and terminology can change and must be maintained in `config/config.yaml`.
-7. The current tests are lightweight and do not yet constitute a full mocked integration suite.
+7. The 75 offline cases cover providers, state, identity, rendering, alerts, and watchdog behavior, but do not constitute a complete end-to-end mocked Gmail delivery/recovery suite or prove live scheduler success.
 8. Historical logs contain earlier Gemini migration errors. They are inert history and do not affect the current OpenAI implementation.
 9. The old project location may retain an empty directory until the previous workspace process releases its Windows filesystem handle; it contains no application files and does not affect production.
-10. The virtual environment metadata and text activation scripts now point to the new project path. Some generated console-launcher `.exe` files still contain the old absolute path; the scheduled wrapper and verified tests invoke `.venv\Scripts\python.exe` directly, so use `python -m ...` commands or rebuild the environment before relying on those launcher executables.
+10. Prior relocation checks found stale paths in some generated virtual-environment launchers. The scheduled wrappers and verified tests invoke `.venv\Scripts\python.exe` directly. Recreate the environment at its final path and reinstall dependencies before relying on generated launchers; this documentation update did not rebuild it. Direct module calls also need `PYTHONPATH=<project>/src`, because setup does not install the application package.
 11. The current California input schema contains `added_pathways` only; `Existing Pathway Updates` will remain empty until the upstream producer supplies `updated_pathways` records with prior/current CI values.
 12. The delivery watchdog runs on the same computer as the digest. It cannot report a period in which the machine was powered off, or nobody was logged in, for the whole time; covering that case would require an off-machine heartbeat.
-13. Alert delivery depends on the session: the Windows event-log channel needs an elevated task and is therefore disabled, the message box needs an interactive session, and the Desktop marker is the only channel that works with nobody logged in.
+13. Alert channels depend on permissions and session availability: production event log is disabled, popup needs an interactive session, and a Desktop marker can persist without a visible session only if some process runs with access to that Desktop. The current interactive tasks do not run while the user is logged out. Successful marker creation does not prove that an operator read it.
+14. Cloud CI results were not fetched during this local documentation update. The workflow definition and local offline suite are verified separately from GitHub job status.
 
 ## Commercial Repository Standard
 
@@ -205,18 +230,20 @@ Operational consequence: the computer must be powered on and the Windows user mu
 - Generated test caches and work directories are disposable and must be excluded from source control.
 - Runtime credentials remain only in `runtime/secrets/` and must never be committed, logged, or included in shared bundles.
 - Production and development dependencies remain separated in `requirements.txt` and `requirements-dev.txt`.
-- Material changes require regression testing, preview inspection, and synchronized updates to all three project documents; continuous integration enforces the offline suite on every push.
+- Material changes require regression testing, preview inspection, and synchronized updates to all three project documents. CI runs on pushes to `main`/`DS-fix` and pull-request events; other branch pushes alone do not trigger the current workflow. The credential guard checks tracked `runtime/secrets/` files, not all possible secret locations.
 - Logs rotate at a configured size; fixed-name previews are overwritten. State is intentionally retained without pruning.
 
 ## Recommended Next Improvements
 
+- [ ] Verify the October 9 digest task and October 10 watchdog task actually run from the current path; correlate exit results, logs, period state, and mailbox receipt.
+- [ ] Investigate the latest digest Task Scheduler result `1` separately from the successful send record; do not assume the merge or documentation update resolved it.
 - [ ] Add mocked Gmail API integration tests covering ambiguous delivery failure and end-to-end transaction recovery.
 - [ ] Add a dry-run summary showing candidate, included, excluded, and duplicate counts.
 - [x] Add startup validation for core YAML sections and required program/source fields.
 - [x] Add configurable log rotation; preview files are overwritten and state is retained.
 - [ ] Add a health-check command that verifies credentials, paths, model access, and scheduler visibility without sending mail.
 - [ ] Consider a non-interactive service identity if the digest must run while the Windows user is logged out.
-- [x] Added local failure notification (popup, Desktop marker, Windows event log) and an independent Saturday delivery watchdog without adding an external service or dependency.
+- [x] Added popup/Desktop/optional event-log notification and an independent Saturday watchdog; production event log remains disabled.
 - [x] Verified the alert channels on the production machine with `scripts\run_watchdog.bat --test-alert`: the message box was displayed and acknowledged, and the Desktop marker was written. The event-log channel was disabled because it requires elevation.
 - [ ] Consider an off-machine heartbeat if whole-week downtime must also be detected.
 - [ ] Review the regulatory program inventory quarterly.
@@ -226,13 +253,15 @@ Operational consequence: the computer must be powered on and the Windows user mu
 ### Before each scheduled period
 
 - No manual action is normally required.
-- Ensure the computer will be on and the user logged in Friday morning.
+- Ensure the computer will be on and the user logged in for both Friday's digest and Saturday's watchdog.
 - Ensure the OpenAI API account has available credit.
 
 ### After a scheduled run
 
 - Confirm receipt of the digest.
-- If missing, inspect `runtime/logs/weekly_digest.log` and Windows Task Scheduler history.
+- Check both tasks' last result and next trigger, not just their registered paths.
+- If missing or a task result is non-zero, inspect `runtime/logs/weekly_digest.log`, `runtime/state/last_failure.json`, Desktop alert markers, and Task Scheduler history. Compare with the period-specific transaction.
+- For a `sending` transaction, verify the displayed Digest ID in the mailbox and use `--resolve-pending ... --resolution sent|not-sent`; set `PYTHONPATH` first for a direct module call. Do not hand-edit state.
 - Do not delete `runtime/state/state.json` unless deliberate resending is intended.
 
 ### When changing programs or senders
