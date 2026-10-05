@@ -68,6 +68,47 @@ def test_state_rejects_malformed_transaction_item(tmp_path):
         load_state(config, tmp_path)
 
 
+def test_state_rejects_a_timezone_naive_transaction_timestamp(tmp_path):
+    config = {"paths": {"state_file": "state.json"}}
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "send_transactions": {
+                    "wcf-bad": {
+                        "status": "sent",
+                        "period_start": "2026-09-25T00:00:00",
+                        "period_end": "2026-10-02T00:00:00-06:00",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="period_start"):
+        load_state(config, tmp_path)
+
+
+def test_state_rejects_a_timezone_naive_last_run(tmp_path):
+    config = {"paths": {"state_file": "state.json"}}
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "last_run": {
+                    "period_start": "2026-09-25T00:00:00-06:00",
+                    "period_end": "2026-10-02T00:00:00",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="last_run.period_end"):
+        load_state(config, tmp_path)
+
+
 def test_resolve_pending_as_sent_records_item_suppression():
     state = {
         "sent_items": {},

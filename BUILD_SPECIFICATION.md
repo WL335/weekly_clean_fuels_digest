@@ -30,6 +30,9 @@ A conforming implementation must:
 14. Persist a pending send transaction before calling the mail API; mark it sent and record item keys only after the provider confirms success. An ambiguous pending send must block future automatic delivery until explicitly resolved.
 15. Run automatically every Friday at 09:00 in `America/Regina`.
 16. Merge configured local regulatory digest files into the same program and reporting period.
+17. Report every failed run through notification channels that do not depend on the mail transport, and distinguish a configuration or credential failure from a runtime failure in the process exit code.
+18. Run an independent delivery watchdog on its own schedule, using no mail transport. It must judge the expected period by that period's recorded send transaction rather than by recent activity, allow a configurable grace period after the scheduled send time, and alert at most once per missed period.
+19. Never exit without attempting to notify: no failure path, including a provider credential error of an unforeseen exception type and a watchdog that cannot read its own configuration or state, may end silently. An alert that reached no notification channel must not be recorded as delivered.
 
 ## 3. Current Business Scope
 
@@ -152,6 +155,9 @@ Required semantics:
 - `ai.retry_attempts`: transient model-call retry count.
 - `ai.request_timeout_seconds`: per-attempt model request timeout.
 - `ai.run_timeout_seconds`: overall runtime budget, below the scheduler's execution limit.
+- `alerts.popup_enabled`, `alerts.desktop_marker_enabled`, `alerts.event_log_enabled`: independent failure-notification channels.
+- `alerts.grace_hours`: hours after the scheduled send time before the watchdog reports the period as missing.
+- `alerts.watchdog_armed_from`: earliest period end (`YYYY-MM-DD`) that must alert even when no send history exists, or empty for the lenient behaviour.
 - `paths.*`: project-relative credential, token, state, log, and preview paths.
 - `programs`: ordered regulatory-program definitions.
 
@@ -438,11 +444,11 @@ The reference implementation uses these explicit production boundaries:
 src/weekly_clean_fuels_digest/main.py
                               command-line entry point and orchestration
 src/weekly_clean_fuels_digest/gmail_source.py
-                              Gmail provider adapter and message parser
+                              Gmail provider adapter, message parser, and digest sender
 src/weekly_clean_fuels_digest/openai_analyzer.py
                               OpenAI structured analysis adapter
 src/weekly_clean_fuels_digest/digest_renderer.py
-                              shared HTML and text renderer
+                              shared HTML and text renderer, driven by one section table
 src/weekly_clean_fuels_digest/state_store.py
                               durable sent-item state repository
 src/weekly_clean_fuels_digest/shared_digest_models.py
@@ -452,6 +458,11 @@ src/weekly_clean_fuels_digest/integrations/local_digest.py
 tests/test_core.py            email-core and shared-pipeline tests
 tests/test_local_digest_integration.py
                               local-interface tests
+tests/test_state_store.py     durable-state and send-transaction tests
+tests/test_gmail_source.py    provider-adapter tests
+tests/test_alerts.py          notification-channel tests
+tests/test_watchdog.py        delivery-watchdog tests
+tests/test_rendering.py       renderer snapshots and link-scope tests
 ```
 
 `main.py` must not contain Gmail parsing, OpenAI request implementation, renderer implementation, state-file implementation, or source-specific local-file conversion logic. Those concerns belong to the modules above. The optional adapter returns the same shared models used by email-derived items. Configuration key `integrations.local_digest_enabled` controls the adapter and defaults to `true`; when `false`, the application must skip all local digest directories and run the Gmail-only core. Regardless of source, ordering, deduplication, rendering, preview output, state handling, logging, and sending remain shared.
@@ -461,6 +472,8 @@ tests/test_local_digest_integration.py
 ### Windows
 
 Register a Task Scheduler job that runs `scripts/run_weekly.bat` every Friday at 09:00 local time, uses the project directory as the working directory, ignores overlapping instances, has a one-hour execution limit, and starts when available after a missed trigger.
+
+Register a second, independent Task Scheduler job that runs `scripts/run_watchdog.bat` every Saturday at 09:00 local time with its own execution limit. Keep it a separate task so that a failure in the digest task cannot prevent the delivery check, and so that it can run without `OPENAI_API_KEY`.
 
 The current job runs interactively, so the Windows user must be logged in. A non-interactive deployment requires a service account or stored Windows task credentials and access to the user-level API key and OAuth token.
 
@@ -480,6 +493,8 @@ Use a `launchd` LaunchAgent or LaunchDaemon. Set the working directory and envir
 
 Mount or securely provide the Gmail OAuth refresh token, configuration, and durable state. Use a secret manager for `OPENAI_API_KEY`. Ensure only one scheduled instance runs at a time and that `runtime/state/state.json` is stored on durable, atomic storage.
 
+On every platform, schedule the delivery watchdog as a separate job shortly after the expected send time plus its grace period, and never let it depend on the mail transport.
+
 ## 17. Security and Repository Hygiene
 
 This is a maintained commercial codebase. The following are permanent version-controlled project assets and must not be removed during routine cleanup:
@@ -496,7 +511,7 @@ PROJECT_PROGRESS.md
 setup and scheduler scripts
 ```
 
-`tests/` is executable quality-assurance code. `requirements.txt` contains production dependencies; `requirements-dev.txt` contains test and development-only dependencies. Tests must run after material code, rendering, dependency, or configuration-contract changes and before production release.
+`tests/` is executable quality-assurance code. `requirements.txt` contains production dependencies; `requirements-dev.txt` contains test and development-only dependencies. Tests must run after material code, rendering, dependency, or configuration-contract changes and before production release. A continuous-integration workflow must run that suite on every push with no Gmail access, no mail delivery, and no production API key, and must fail if credentials have been committed.
 
 The following must be excluded from version control and deployment bundles intended for sharing:
 
@@ -558,6 +573,18 @@ A rebuilt implementation is equivalent only after all of these pass:
 30. Malformed state/config structures fail at startup with actionable errors.
 31. Gmail and OpenAI request timeouts and the overall run budget are enforced; logs rotate within configured limits.
 32. The state CLI can resolve a pending transaction as sent or not-sent without sending mail.
+33. Every enabled notification channel is attempted on failure, each channel records whether it succeeded, and the exit code distinguishes startup and configuration failures (2), including a missing API key, from failures raised during the run (1), including provider and credential errors.
+34. The watchdog reports a period as missing only after the configured grace period, does not accept an earlier period's send as evidence, reports an unresolved pending transaction as its own case, and notifies at most once per missed period.
+35. `--test-alert` delivers a notification through the enabled channels without sending mail and without changing state.
+36. Both renderers accept the digest ID as an argument. A rendered body contains the digest ID only when it is supplied, and no caller rewrites rendered markup to insert it.
+37. A local item whose source URL is not public renders without a link in both HTML and plain text.
+38. Continuous integration runs the offline suite on every push with no Gmail access, no delivery, and no production key, and fails when credentials are tracked.
+39. Both formats derive subsection order, multiline handling, and link scope from a single section definition. Adding a subsection requires one entry there, the California pathway groups continue to share exactly one link, and rendering is covered by snapshots taken against a frozen fixture configuration rather than the live inventory.
+40. A failure of any exception type aborts the run, returns the runtime exit code, and attempts notification; a Google auth `RefreshError` in particular is covered.
+41. A watchdog that cannot read its configuration or state notifies instead of exiting quietly. An alert that reached no notification channel is not recorded, so the next check retries, and `--test-alert` returns a failure code when nothing was delivered.
+42. A record whose period start is later than the expected start does not satisfy the weekly check, an earlier catch-up start does, and with `alerts.watchdog_armed_from` set a watchdog with no history alerts instead of staying silent.
+43. State validation rejects a period timestamp that is not timezone-aware, a send record with a naive timestamp cannot prove delivery, and an unexpected failure anywhere in the watchdog flow still notifies instead of escaping silently.
+44. A message box that is not acknowledged within its timeout is never counted as delivered, and no shared side channel may let one call's outcome decide another's.
 
 ## 19. Rebuild Procedure
 
@@ -576,4 +603,4 @@ A rebuilt implementation is equivalent only after all of these pass:
 
 ## 20. Definition of Done
 
-The rebuild is complete when it can run unattended, produce the same program grouping and filtering behavior, send to the correct mailbox, avoid duplicate items, survive a missed schedule where supported, expose no secrets, abort on incomplete analysis, and pass every acceptance test above.
+The rebuild is complete when it can run unattended, produce the same program grouping and filtering behavior, send to the correct mailbox, avoid duplicate items, survive a missed schedule where supported, expose no secrets, abort on incomplete analysis, tell a human when a scheduled delivery did not happen, and pass every acceptance test above.

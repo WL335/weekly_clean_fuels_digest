@@ -35,6 +35,28 @@ integrations:
   # Set to false to run the Gmail-only core workflow.
   local_digest_enabled: true
 
+alerts:
+  # How a failed weekly run, or a week with no delivery at all, reaches a human.
+  # These channels deliberately avoid the mail transport: a Gmail problem must
+  # not be able to hide itself.
+  # Popup: msg.exe when present, otherwise a PowerShell message box. Verified on
+  # the production machine, where msg.exe is not installed.
+  popup_enabled: true
+  # Desktop marker: a date-stamped file that stays until deleted. This is the
+  # channel that survives a closed session, so keep it enabled.
+  desktop_marker_enabled: true
+  # Event log: eventcreate.exe exists but returns "Access is denied" unless the
+  # task runs elevated. Disabled on purpose: a channel that cannot deliver is
+  # worse than no channel. Enable it only for an elevated deployment.
+  event_log_enabled: false
+  # Hours after the scheduled Friday 09:00 send time before the watchdog reports
+  # the period as missing. Six hours means the alert arrives Friday afternoon.
+  grace_hours: 6
+  # Earliest period end (YYYY-MM-DD) the watchdog must treat as "should have been
+  # delivered" even when no send history exists at all, for example after the
+  # state file is lost. Without it a watchdog with no history stays silent.
+  watchdog_armed_from: "2026-10-09"
+
 local_digest_sources:
   - id: "california_lcfs_digest_input"
     program_id: "california_lcfs"

@@ -1,0 +1,49 @@
+WEEKLY CLEAN FUELS REGULATORY UPDATE
+Reporting period: September 25–October 1, 2026
+Updates identified: 6
+
+UNITED STATES
+=============
+
+California Low Carbon Fuel Standard (LCFS)
+Newly Certified Pathway(s)
+-
+Anew RNG, LLC (5877) — Bio-CNG (Tier 1)
+Certified CI: -382 gCO2e/MJ
+Pathway Description: Biogas from swine manure in Laverne, OK
+
+Redfield Energy, LLC (4061) — Ethanol (Tier 1)
+Certified CI: 69.13 gCO2e/MJ
+Pathway Description: Midwest Corn, Dry Mill
+
+Existing Pathway Updates
+-
+Redfield Energy, LLC (4061) — Ethanol - Cellulosic (Tier 1)
+Certified CI updated: 26.97 → 25.10 gCO2e/MJ
+Pathway Description: Corn Fiber Ethanol via the EDENIQ process
+
+View original source: https://ww2.arb.ca.gov/sites/default/files/classic/fuels/lcfs/fuelpathways/current-pathways_all.xlsx
+
+LCFS quarterly workshop announced
+CARB will hold a public workshop on the quarterly LCFS report.
+View original source: https://mail.google.com/mail/u/0/#all/fixture-ca
+
+Oregon Clean Fuels Program (CFP)
+No relevant updates identified this week.
+
+CANADA
+======
+
+BC Low Carbon Fuel Standard (LCFS)
+Guidance Updates
+-
+RLCF-009 — Reporting Responsibility and Requirements for Type B Fuels
+The guidance clarifies responsibility and allocation rules for non-electric Type B fuels.
+
+View original source: https://www2.gov.bc.ca/gov/content/industry/electricity-alternative-energy/transportation-energies/renewable-low-carbon-fuels/information-bulletins
+
+BC LCFS information bulletin archived
+An older bulletin was archived with no changes to requirements.
+Local digest: bc_archive.json
+
+Digest ID: wcf-fixture-0001

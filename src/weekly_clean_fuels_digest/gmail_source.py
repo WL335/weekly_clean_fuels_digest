@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from email.message import EmailMessage
 from email.utils import parseaddr
 from functools import partial
 from pathlib import Path
@@ -241,6 +242,30 @@ def parse_message(service, message_id: str, timezone_name: str) -> RawEmail:
         links=meaningful_links(html_parts),
         gmail_url=f"https://mail.google.com/mail/u/0/#all/{message_id}",
     )
+
+
+def send_digest(
+    service, config: dict, subject: str, html_body: str, text_body: str, digest_id: str
+) -> str:
+    """Send the multipart digest and return the provider message ID.
+
+    This belongs to the mail adapter, not to the orchestrator: the rebuild
+    specification assigns ``send_multipart_email`` to the provider boundary. The
+    ``Message-ID`` is derived from the digest ID so a delivered digest stays
+    identifiable without relying on the subject line.
+    """
+    message = EmailMessage()
+    message["To"] = config["mailbox"]["recipient"]
+    message["From"] = config["mailbox"]["sender"]
+    message["Subject"] = subject
+    message["Message-ID"] = f"<{digest_id}@weekly-clean-fuels-digest.local>"
+    message.set_content(text_body)
+    message.add_alternative(html_body, subtype="html")
+    encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    response = (
+        service.users().messages().send(userId="me", body={"raw": encoded}).execute()
+    )
+    return response["id"]
 
 
 

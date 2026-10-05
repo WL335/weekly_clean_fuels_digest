@@ -244,11 +244,44 @@ The Python code does not need to be changed when the regulatory inventory evolve
 
 - Keep production code, configuration, documentation, `tests/`, `requirements.txt`, and `requirements-dev.txt` as permanent maintained project assets.
 - Run the automated tests after every code, dependency, configuration-schema, or rendering change and before production deployment.
+- `.github\workflows\ci.yml` runs that same offline suite on every push (Windows, Python 3.11 and 3.13). It uses no Gmail access, sends no mail, and needs no production key.
+- Rendered email output is pinned by snapshots in `tests\fixtures\`. After a deliberate, reviewed change to the layout, regenerate them with `set UPDATE_RENDER_FIXTURES=1` before running the suite, and read the resulting diff.
 - Delete generated caches and test work directories after verification; never delete `tests/` as routine cleanup.
 - Review dependency upgrades before deployment and preserve reproducible dependency manifests.
 - Keep all credentials outside source control and limit filesystem access to `runtime/secrets/`, state, logs, and output.
 - Retain operational logs and generated reports according to an explicit business retention policy; do not treat historical logs as source configuration.
 - Update `README.md`, `BUILD_SPECIFICATION.md`, and `PROJECT_PROGRESS.md` together whenever production behavior, deployment paths, integrations, or operating procedures change.
+
+## Failure alerts and the delivery watchdog
+
+The digest is the only thing that reports a week's regulatory activity, so a week with no email must not pass silently. Two mechanisms cover that.
+
+**The run reports its own failure.** When the weekly run fails, the application writes `runtime\state\last_failure.json` and, in send mode, tries three notification channels that do not use Gmail:
+
+- a message box — through `msg.exe` when it is installed, otherwise through a PowerShell message box; it needs you to be logged in, and a dialog that is not dismissed within a minute counts as unconfirmed rather than delivered;
+- a date-stamped file on your Desktop, `Weekly Digest ALERT <date>.txt` — survives a closed session, and it is the only channel that works with nobody logged in;
+- an entry in the Windows Application event log (`eventcreate.exe`) — disabled by default, because it needs an elevated task and otherwise fails with `Access is denied`.
+
+Every channel records whether it worked, so `runtime\logs\weekly_digest.log` and the console output state which notifications you can expect to have seen. The process exit code distinguishes the failure kind in Task Scheduler history: `0` success, `1` a failure raised during the run (including a Gmail or OpenAI credential error), `2` a startup failure such as a missing or invalid configuration, a missing `OPENAI_API_KEY`, or unusable state.
+
+**The watchdog checks delivery independently.** `scripts\run_watchdog.bat` runs from its own scheduled task every Saturday at 09:00. It sends no mail, does not need `OPENAI_API_KEY`, and answers one question: did the digest for the period that ended on Friday actually go out? Four rules keep that answer honest:
+
+- A period counts as delivered only if the recorded send covers the whole week. A shorter one-off report whose end date happens to match does not mask a missing weekly digest, while a longer catch-up run still counts.
+- A period is reported only after the scheduled send time plus `alerts.grace_hours` (six hours by default), and each missed period is reported once.
+- If no notification channel delivers, the period is deliberately left unmarked so the next check retries. If the watchdog cannot read its own configuration or state, it alerts rather than exiting quietly.
+- `alerts.watchdog_armed_from` names the earliest period end that must alert even when there is no send history at all. That is what makes a lost `state.json`, or a first automatic send that never succeeded, visible instead of silent.
+
+Its exit codes are `0` nothing wrong, `2` configuration problem, `3` a digest is missing or blocked, `4` the alert itself could not be delivered. Bookkeeping lives in `runtime\state\watchdog.json`, separate from the digest's own state.
+
+Verify the channels once, before relying on them:
+
+```bat
+scripts\run_watchdog.bat --test-alert
+```
+
+This sends a test notification through every enabled channel without sending mail and without changing state. It exits non-zero when no channel reached anybody, so a zero exit means the notification really arrived. If a channel does not reach you, switch it off under `alerts:` in `config\config.yaml` rather than leaving one that only looks like it works.
+
+Limitation: the watchdog runs on the same computer as the digest. If the computer is off, or nobody is logged in, for a whole period, no local check can report it; that case would need an off-machine heartbeat.
 
 ## Troubleshooting
 
@@ -278,7 +311,7 @@ Check:
 runtime\logs\weekly_digest.log
 ```
 
-Also confirm that the task can access the user-level `OPENAI_API_KEY` and that the computer was online.
+Also confirm that the task can access the user-level `OPENAI_API_KEY` and that the computer was online. Since the run reports its own failures, also check `runtime\state\last_failure.json` and your Desktop for `Weekly Digest ALERT *.txt`. If neither exists and no alert appeared, run `scripts\run_watchdog.bat` to see what the watchdog concludes.
 
 ### A relevant item was missed
 

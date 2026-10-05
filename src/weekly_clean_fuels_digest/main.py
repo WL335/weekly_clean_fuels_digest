@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 import time
 from dataclasses import asdict
 from datetime import date, datetime, time as dt_time, timedelta
-from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from logging.handlers import RotatingFileHandler
 
 import yaml
-from googleapiclient.errors import HttpError
 
+from .alerts import AlertSettings, clear_failure_record, report_failure
 from .digest_renderer import human_period, render_html, render_text
 from .gmail_source import (
     build_sender_index,
@@ -25,6 +24,7 @@ from .gmail_source import (
     gmail_service,
     list_message_ids,
     parse_message,
+    send_digest,
 )
 from .integrations import local_digest as local_digest_integration
 from .openai_analyzer import analyze_email
@@ -141,6 +141,26 @@ def load_config(path: Path) -> dict:
         value = config.get("paths", {}).get(field, default)
         if not isinstance(value, int) or value < 0 or (field == "log_max_bytes" and value == 0):
             raise ValueError(f"Configuration paths.{field} has an invalid value.")
+    alerts = config.get("alerts", {})
+    if not isinstance(alerts, dict):
+        raise ValueError("Configuration section 'alerts' must be an object.")
+    for field in ("popup_enabled", "desktop_marker_enabled", "event_log_enabled"):
+        if field in alerts and not isinstance(alerts[field], bool):
+            raise ValueError(f"Configuration alerts.{field} must be true or false.")
+    try:
+        if float(alerts.get("grace_hours", 6)) <= 0:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Configuration alerts.grace_hours must be positive.") from exc
+    armed_from = alerts.get("watchdog_armed_from")
+    if armed_from not in (None, ""):
+        try:
+            date.fromisoformat(str(armed_from))
+        except ValueError as exc:
+            raise ValueError(
+                "Configuration alerts.watchdog_armed_from must be a YYYY-MM-DD date "
+                "or empty."
+            ) from exc
     sources = config.get("local_digest_sources", [])
     if not isinstance(sources, list):
         raise ValueError("Configuration local_digest_sources must be a list.")
@@ -244,20 +264,6 @@ def digest_identity(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:24]
     return f"wcf-{fingerprint}"
-
-
-def add_digest_id_footer(html_body: str, text_body: str, digest_id: str) -> tuple[str, str]:
-    html_footer = (
-        "<br><span style='font-size:10px;color:#87919a;'>"
-        f"Digest ID: {digest_id}"
-    )
-    html_body = html_body.replace(
-        "Please use the original source for verification.</td></tr>",
-        f"Please use the original source for verification.{html_footer}</span></td></tr>",
-        1,
-    )
-    text_body = f"{text_body.rstrip()}\n\nDigest ID: {digest_id}\n"
-    return html_body, text_body
 
 
 def resolve_pending_transaction(
@@ -375,52 +381,78 @@ def write_preview(html_body: str, text_body: str, items: list[DigestItem], confi
     logging.info("Preview written to %s", html_path)
 
 
-def send_digest(
-    service, config: dict, subject: str, html_body: str, text_body: str, digest_id: str
-) -> str:
-    message = EmailMessage()
-    message["To"] = config["mailbox"]["recipient"]
-    message["From"] = config["mailbox"]["sender"]
-    message["Subject"] = subject
-    message["Message-ID"] = f"<{digest_id}@weekly-clean-fuels-digest.local>"
-    message.set_content(text_body)
-    message.add_alternative(html_body, subtype="html")
-    encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
-    response = (
-        service.users().messages().send(userId="me", body={"raw": encoded}).execute()
-    )
-    return response["id"]
+EXIT_RUNTIME_FAILURE = 1
+EXIT_CONFIG_FAILURE = 2
 
 
 def main() -> int:
     args = parse_args()
-    config = load_config(args.config)
-    setup_logging(config)
-    run_timeout = float(config["ai"].get("run_timeout_seconds", 3300))
-    if run_timeout <= 0:
-        raise ValueError("ai.run_timeout_seconds must be positive.")
-    run_deadline = time.monotonic() + run_timeout
-    config["_run_deadline_monotonic"] = run_deadline
+    stage = {"name": "startup"}
+    settings = AlertSettings()
 
-    def ensure_run_budget(stage: str) -> None:
+    def fail(exc: BaseException, exit_code: int, context: dict | None = None) -> int:
+        """Report a failed run through every alert channel, then return the code."""
+        return report_failure(
+            exc=exc,
+            stage=stage["name"],
+            settings=settings,
+            project_root=ROOT,
+            mode="send" if args.send else "preview",
+            exit_code=exit_code,
+            notify_operator=bool(args.send),
+            context=context,
+        )
+
+    try:
+        config = load_config(args.config)
+        setup_logging(config)
+        settings = AlertSettings.from_config(config)
+        run_timeout = float(config["ai"].get("run_timeout_seconds", 3300))
+        if run_timeout <= 0:
+            raise ValueError("ai.run_timeout_seconds must be positive.")
+        run_deadline = time.monotonic() + run_timeout
+        config["_run_deadline_monotonic"] = run_deadline
+        timezone_name = config["schedule"].get("timezone", "America/Regina")
+        start, end = reporting_window(timezone_name, args.start, args.end)
+        sender_index, senders = build_sender_index(config)
+        state = load_state(config, ROOT)
+        if not args.resolve_pending and not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. See README.md for the Windows setup command."
+            )
+    except Exception as exc:
+        logging.exception("Startup failed")
+        return fail(exc, EXIT_CONFIG_FAILURE)
+
+    def ensure_run_budget(stage_name: str) -> None:
+        stage["name"] = stage_name
         remaining = run_deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError(f"Run time budget exhausted before {stage}.")
-
-    timezone_name = config["schedule"].get("timezone", "America/Regina")
-    start, end = reporting_window(timezone_name, args.start, args.end)
-    sender_index, senders = build_sender_index(config)
-    state = load_state(config, ROOT)
+            raise RuntimeError(f"Run time budget exhausted before {stage_name}.")
 
     if args.resolve_pending:
         if not args.resolution:
-            raise ValueError("Use --resolution sent or --resolution not-sent with --resolve-pending.")
-        resolve_pending_transaction(state, args.resolve_pending, args.resolution, timezone_name)
-        save_state(config, state, ROOT)
+            return fail(
+                ValueError(
+                    "Use --resolution sent or --resolution not-sent with --resolve-pending."
+                ),
+                EXIT_CONFIG_FAILURE,
+            )
+        try:
+            stage["name"] = "resolve pending transaction"
+            resolve_pending_transaction(
+                state, args.resolve_pending, args.resolution, timezone_name
+            )
+            save_state(config, state, ROOT)
+        except Exception as exc:
+            logging.exception("Could not resolve pending transaction")
+            return fail(exc, EXIT_CONFIG_FAILURE, {"digest_id": args.resolve_pending})
         print(f"Resolved {args.resolve_pending} as {args.resolution}; no email was sent.")
         return 0
     if args.resolution:
-        raise ValueError("--resolution requires --resolve-pending.")
+        return fail(
+            ValueError("--resolution requires --resolve-pending."), EXIT_CONFIG_FAILURE
+        )
 
     try:
         ensure_run_budget("Gmail connection")
@@ -451,6 +483,7 @@ def main() -> int:
             "local_digest_enabled", True
         )
         if local_digest_enabled:
+            stage["name"] = "local digest discovery"
             local_messages = local_digest_integration.load_local_digest_messages(
                 config, start, end, ROOT
             )
@@ -478,10 +511,11 @@ def main() -> int:
             sent_items = state.get("sent_items", {})
             items = [item for item in items if item.item_key not in sent_items]
 
-        html_body = render_html(items, config, start, end)
-        text_body = render_text(items, config, start, end)
+        stage["name"] = "rendering"
         digest_id = digest_identity(config, start, end, args.include_processed)
-        html_body, text_body = add_digest_id_footer(html_body, text_body, digest_id)
+        html_body = render_html(items, config, start, end, digest_id)
+        text_body = render_text(items, config, start, end, digest_id)
+        stage["name"] = "preview output"
         write_preview(html_body, text_body, items, config)
 
         if args.send:
@@ -538,11 +572,13 @@ def main() -> int:
                 ],
             }
             transactions[digest_id] = transaction
+            stage["name"] = "recording send transaction"
             save_state(config, state, ROOT)
             sent_message_id = send_digest(
                 service, config, subject, html_body, text_body, digest_id
             )
             sent_at = datetime.now(ZoneInfo(timezone_name)).isoformat()
+            stage["name"] = "recording sent items"
             state.setdefault("sent_items", {})
             for item in items:
                 state["sent_items"][item.item_key] = {
@@ -568,11 +604,15 @@ def main() -> int:
             logging.info("Digest sent successfully. Gmail message ID: %s", sent_message_id)
         else:
             logging.info("Preview mode complete; no email sent and state was not changed.")
+        clear_failure_record(ROOT)
         return 0
-    except (HttpError, OSError, ValueError, RuntimeError) as exc:
+    except Exception as exc:
+        # Deliberately broad: lazily loaded provider libraries raise their own types
+        # (for example google.auth.exceptions.RefreshError, which is none of OSError,
+        # ValueError, or RuntimeError), and an unattended weekly job must never fail
+        # without notifying the operator.
         logging.exception("Weekly digest failed")
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+        return fail(exc, EXIT_RUNTIME_FAILURE)
 
 
 if __name__ == "__main__":
